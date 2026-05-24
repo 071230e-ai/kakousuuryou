@@ -1,1 +1,138 @@
-h1 { font-family: Arial, Helvetica, sans-serif; }
+/* 村田鉄筋 加工数量分析 - スタイル */
+:root {
+  --color-honsha: #2563eb;    /* 本社工場 = 青 */
+  --color-dai2: #16a34a;       /* 第二工場 = 緑 */
+  --color-total: #6b7280;      /* 全体 = グレー */
+}
+
+body { font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic", Meiryo, sans-serif; }
+
+.factory-honsha { background-color: #dbeafe; color: #1e3a8a; border-color: #93c5fd; }
+.factory-dai2   { background-color: #dcfce7; color: #14532d; border-color: #86efac; }
+.factory-all    { background-color: #f3f4f6; color: #1f2937; border-color: #d1d5db; }
+
+.badge-honsha { background-color: #2563eb; color: white; }
+.badge-dai2   { background-color: #16a34a; color: white; }
+
+.part-foundation { background-color: #fee2e2; }
+.part-base       { background-color: #fed7aa; }
+.part-column     { background-color: #fef3c7; }
+.part-beam       { background-color: #d9f99d; }
+.part-fukashi    { background-color: #a7f3d0; }
+.part-slab       { background-color: #bae6fd; }
+.part-doma       { background-color: #c7d2fe; }
+.part-civil      { background-color: #ddd6fe; }
+.part-wooden     { background-color: #fbcfe8; }
+.part-other      { background-color: #e5e7eb; }
+
+table.data-table { border-collapse: collapse; width: 100%; font-size: 0.875rem; }
+table.data-table th, table.data-table td {
+  border: 1px solid #d1d5db;
+  padding: 6px 8px;
+  text-align: right;
+  white-space: nowrap;
+}
+table.data-table th {
+  background-color: #f3f4f6;
+  font-weight: 600;
+  text-align: center;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+table.data-table td.text { text-align: left; }
+table.data-table tr:hover { background-color: #f9fafb; }
+table.data-table tr.low-qty { background-color: #fef2f2; }
+table.data-table tr.high-perperson { background-color: #ecfccb; }
+
+.nav-btn {
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: white;
+  border: 1px solid #d1d5db;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.nav-btn:hover { background: #f3f4f6; }
+.nav-btn.active { background: #2563eb; color: white; border-color: #2563eb; }
+
+.input-num {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  text-align: right;
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+}
+.input-num:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.2); }
+
+.input-base {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 1rem;
+}
+.input-base:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.2); }
+
+.btn-primary {
+  padding: 12px 20px;
+  background: #2563eb;
+  color: white;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: background 0.15s;
+}
+.btn-primary:hover { background: #1d4ed8; }
+.btn-secondary {
+  padding: 10px 16px;
+  background: white;
+  color: #374151;
+  border-radius: 8px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid #d1d5db;
+}
+.btn-secondary:hover { background: #f3f4f6; }
+.btn-danger {
+  padding: 8px 14px;
+  background: #dc2626;
+  color: white;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+}
+.btn-danger:hover { background: #b91c1c; }
+
+.stat-card {
+  background: white;
+  padding: 18px 20px;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  border-left: 5px solid #2563eb;
+}
+.stat-card .label { font-size: 0.875rem; color: #6b7280; margin-bottom: 4px; }
+.stat-card .value { font-size: 1.75rem; font-weight: 700; color: #111827; font-variant-numeric: tabular-nums; }
+.stat-card .sub { font-size: 0.8rem; color: #6b7280; margin-top: 4px; }
+.stat-card.honsha { border-left-color: var(--color-honsha); }
+.stat-card.dai2 { border-left-color: var(--color-dai2); }
+.stat-card.all { border-left-color: #f59e0b; }
+
+@media (max-width: 640px) {
+  .stat-card .value { font-size: 1.4rem; }
+  table.data-table { font-size: 0.75rem; }
+  table.data-table th, table.data-table td { padding: 4px 6px; }
+}
+
+/* 印刷用 */
+@media print {
+  body { background: white; }
+  .no-print { display: none !important; }
+  .stat-card { break-inside: avoid; }
+}

@@ -3,10 +3,18 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:sandbox": "wrangler pages dev dist --d1=DB=webapp-production --local --ip 0.0.0.0 --port 3000",
     "build": "vite build",
-    "preview": "wrangler pages dev",
-    "deploy": "npm run build && wrangler pages deploy",
-    "cf-typegen": "wrangler types --env-interface CloudflareBindings"
+    "preview": "wrangler pages dev dist",
+    "deploy": "npm run build && wrangler pages deploy dist",
+    "deploy:prod": "npm run build && wrangler pages deploy dist --project-name webapp",
+    "cf-typegen": "wrangler types --env-interface CloudflareBindings",
+    "db:migrate:local": "wrangler d1 migrations apply murata-tekkin-processing-prod --local",
+    "db:migrate:prod": "wrangler d1 migrations apply murata-tekkin-processing-prod --remote",
+    "db:seed:local": "wrangler d1 execute murata-tekkin-processing-prod --local --file=./seed.sql",
+    "db:seed:prod": "wrangler d1 execute murata-tekkin-processing-prod --remote --file=./seed.sql",
+    "db:reset": "rm -rf .wrangler/state/v3/d1 && npm run db:migrate:local && npm run db:seed:local",
+    "clean-port": "fuser -k 3000/tcp 2>/dev/null || true"
   },
   "dependencies": {
     "hono": "^4.12.12"
@@ -14,6 +22,7 @@
   "devDependencies": {
     "@hono/vite-build": "^1.2.0",
     "@hono/vite-dev-server": "^0.18.2",
+    "@cloudflare/workers-types": "^4.20250705.0",
     "vite": "^6.3.5",
     "wrangler": "^4.4.0"
   }
