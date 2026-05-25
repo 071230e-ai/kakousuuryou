@@ -16,7 +16,10 @@ export const renderer = jsxRenderer(({ children }) => {
         <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.0/dist/jspdf.plugin.autotable.min.js"></script>
         <link href="/static/style.css" rel="stylesheet" />
       </head>
-      <body class="bg-gray-100 min-h-screen">{children}</body>
+      <body class="bg-gray-100 min-h-screen">
+        {children}
+        <script src="/static/app.js"></script>
+      </body>
     </html>
   )
 })

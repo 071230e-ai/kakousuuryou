@@ -11,6 +11,7 @@
   - ログイン（管理者 / 一般ユーザー）と権限制御
   - 月間目標設定と達成率表示
   - 前日コピー機能、重複登録チェック、低数量自動色付け
+  - **人員名登録 / 人員別分析** (v1.2): 加工実績ごとに人員名を複数登録し、人ごとの加工量・参加日数・部位別構成を分析
 
 ## 公開 URL
 - **本番**: https://murata-tekkin-processing.pages.dev
@@ -29,9 +30,11 @@
   - DB ID: `0417f3ce-1fab-405a-b632-e6bbbe07ed7d`
 - **主要テーブル**:
   - `users`: ユーザー（id, username, password_hash[SHA-256], display_name, role）
-  - `processing_records`: 加工実績（日付 / 工場 / 人員数 / 部位別10項目 / 総量 / 1人あたり / 備考）
+  - `processing_records`: 加工実績（日付 / 工場 / 人員数 / 部位別10項目 / 総量 / 1人あたり / 備考 / **worker_names** JSON 配列）
   - `monthly_targets`: 月間目標（年・月・工場・目標数量）
   - `sessions`: ログインセッショントークン（7日有効）
+  - **`workers`**: 人員マスタ（id, name UNIQUE, is_active, created_at）— 入力時に自動 upsert
+  - **`processing_record_workers`**: 加工実績と人員の関連テーブル（processing_record_id, worker_id, worker_name, factory, date）— 人別分析用の正規化テーブル（cascade delete対応）
 
 ### 部位 10 区分
 基礎 / ベース / 柱 / 梁 / フカシ / スラブ / 土間 / 土木 / 木造 / その他
@@ -39,6 +42,9 @@
 ### 計算ルール
 - `total_qty` = 全 10 部位の合計（kg）
 - `qty_per_person` = `total_qty ÷ staff_count`（人員数 0 の場合は 0）
+- **人員名がある場合は `staff_count` を `worker_names.length` に自動上書き**（手入力より優先）
+- **人別加工量** = `その日の総加工量 ÷ その日の参加人員数` → 同日参加した各人に同量割り当て
+- **人別部位別量** = `その日の部位別量 ÷ 参加人員数` を各人に割り当てて積算
 
 ## 主要 API エンドポイント
 ### 認証
@@ -62,9 +68,16 @@
 | メソッド | パス | 説明 |
 |---|---|---|
 | GET | `/api/analytics/dashboard` | 今日・今月・今年の集計 |
-| GET | `/api/analytics/daily?dateFrom&dateTo&factory` | 日別集計 |
+| GET | `/api/analytics/daily?dateFrom&dateTo&factory` | 日別集計（人員名リスト含む） |
 | GET | `/api/analytics/monthly?year&factory` | 月別集計 |
 | GET | `/api/analytics/yearly?factory` | 年別集計 |
+| GET | `/api/analytics/workers?year&month&dateFrom&dateTo&factory&worker_name` | 人員別集計（参加日数 / 総加工量 / 工場別 / 部位別10項目） |
+| GET | `/api/analytics/workers/monthly?year&factory&worker_name` | 人員別月別推移 |
+
+### 人員マスタ
+| メソッド | パス | 説明 |
+|---|---|---|
+| GET | `/api/workers` | 登録された全人員のリスト |
 
 ### 月間目標
 | メソッド | パス | 認証 |
@@ -74,13 +87,14 @@
 
 ## 画面構成
 1. **ダッシュボード**: 今日・今月・今年の加工量、工場別、部位別円グラフ、目標達成率
-2. **加工数量入力**: 日付/工場/人員数/部位別10項目/備考、前日コピーボタン
-3. **加工実績一覧**: 絞り込み・編集・削除・CSV/PDF 出力、低数量行は赤、高生産性行は緑で表示
+2. **加工数量入力**: 日付/工場/人員数/**人員名（複数追加・削除可、行ごとに追加ボタン）**/部位別10項目/備考、前日コピーボタン（人員名も含めてコピー）
+3. **加工実績一覧**: 人員名タグ列付き、絞り込み・編集・削除・CSV/PDF 出力、低数量行は赤、高生産性行は緑で表示
 4. **日別分析**: 日付ごとの棒グラフ（工場積み上げ）と表
 5. **月別分析**: 月ごとの棒グラフと月間サマリ表
 6. **年間分析**: 年別、月別推移（1人あたり）、部位別年間集計
 7. **工場比較**: 本社 vs 第二の月別・部位別並列比較、構成比表示
-8. **月間目標設定**（管理者のみ）
+8. **人員別分析** (NEW): 期間/年/月/工場/人員名で絞り込み、KPI（総加工量/登録人員数/1人あたり平均/最多加工量者/最多参加日数者）、ランキング表、5つのグラフ（総加工量・参加日数・1日平均・部位別構成・月別推移）、CSV/PDF 出力
+9. **月間目標設定**（管理者のみ）
 
 ## ユーザーガイド
 ### 加工数量の入力
