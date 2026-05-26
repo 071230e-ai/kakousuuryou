@@ -16,7 +16,7 @@
 
 ## 公開 URL
 - **本番**: https://murata-tekkin-processing.pages.dev
-- **最新デプロイ (v1.2 人員別分析)**: https://330ed45d.murata-tekkin-processing.pages.dev
+- **最新デプロイ (v1.3 人工 / man_days 対応)**: https://6008bb4c.murata-tekkin-processing.pages.dev
 - **GitHub**: https://github.com/071230e-ai/kakousuuryou
 
 ## 初期ログインアカウント
