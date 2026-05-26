@@ -12,6 +12,7 @@
   - 月間目標設定と達成率表示
   - 前日コピー機能、重複登録チェック、低数量自動色付け
   - **人員名登録 / 人員別分析** (v1.2): 加工実績ごとに人員名を複数登録し、人ごとの加工量・参加日数・部位別構成を分析
+  - **人工（man_days）入力対応** (v1.3 / プレビュー中): 各人員に 0〜1 の人工値（1日=1.0、半日=0.5、四半日=0.25）を入力可能。人員数 = 人工合計（例: 1+1+0.5 → 2.5人工）。総加工量 ÷ 人工合計で「1人工あたり加工数量」を計算し、部位別数量も人工に応じて按分。CSV/PDF/一覧/人員別分析すべて対応。`worker_names` のみの旧データは各人 1.0 人工として後方互換。
 
 ## 公開 URL
 - **本番**: https://murata-tekkin-processing.pages.dev
@@ -30,21 +31,23 @@
   - DB ID: `0417f3ce-1fab-405a-b632-e6bbbe07ed7d`
 - **主要テーブル**:
   - `users`: ユーザー（id, username, password_hash[SHA-256], display_name, role）
-  - `processing_records`: 加工実績（日付 / 工場 / 人員数 / 部位別10項目 / 総量 / 1人あたり / 備考 / **worker_names** JSON 配列）
+  - `processing_records`: 加工実績（日付 / 工場 / 人員数 / 部位別10項目 / 総量 / 1人あたり / 備考 / **worker_names** JSON配列 / **workers_json** JSON配列[{name, man_days}]）
   - `monthly_targets`: 月間目標（年・月・工場・目標数量）
   - `sessions`: ログインセッショントークン（7日有効）
   - **`workers`**: 人員マスタ（id, name UNIQUE, is_active, created_at）— 入力時に自動 upsert
-  - **`processing_record_workers`**: 加工実績と人員の関連テーブル（processing_record_id, worker_id, worker_name, factory, date）— 人別分析用の正規化テーブル（cascade delete対応）
+  - **`processing_record_workers`**: 加工実績と人員の関連テーブル（processing_record_id, worker_id, worker_name, **man_days REAL DEFAULT 1.0**, factory, date）— 人別分析用の正規化テーブル（cascade delete対応）
 
 ### 部位 10 区分
 基礎 / ベース / 柱 / 梁 / フカシ / スラブ / 土間 / 土木 / 木造 / その他
 
-### 計算ルール
+### 計算ルール（v1.3 人工対応）
 - `total_qty` = 全 10 部位の合計（kg）
-- `qty_per_person` = `total_qty ÷ staff_count`（人員数 0 の場合は 0）
-- **人員名がある場合は `staff_count` を `worker_names.length` に自動上書き**（手入力より優先）
-- **人別加工量** = `その日の総加工量 ÷ その日の参加人員数` → 同日参加した各人に同量割り当て
-- **人別部位別量** = `その日の部位別量 ÷ 参加人員数` を各人に割り当てて積算
+- **`staff_count` の意味が変更**: 人員が登録されている場合は **人工合計（man_days の総和）** を表す（例: 1.0+1.0+0.5 → 2.5）。手入力時は従来通り人数値。
+- `qty_per_person`（= 1人工あたり加工数量）= `total_qty ÷ staff_count`（0 の場合は 0、ゼロ除算なし）
+- **人工（man_days）**: 各人員ごとに 0〜1 の値。1日=1.0、半日=0.5、四半日=0.25。空欄/非数値→1.0、負値→0、1超→1 にクランプ。
+- **人別加工量** = `(その日の総加工量 ÷ 人工合計) × その人の人工` → 人工に応じた按分
+- **人別部位別量** = `(その日の部位別量 ÷ 人工合計) × その人の人工` を積算
+- **後方互換**: 旧データ（`workers_json=null` で `worker_names` のみ）は各人 `man_days=1.0` として読み込まれる
 
 ## 主要 API エンドポイント
 ### 認証

@@ -50,7 +50,7 @@ function calcTotals(rec: Record<string, any>) {
   return { total_qty: total, qty_per_person: per }
 }
 
-// 人員名の正規化と重複排除
+// 人員名の正規化と重複排除 (旧 worker_names 用、互換性のため残す)
 function normalizeWorkerNames(input: any): string[] {
   if (input == null) return []
   let arr: any[] = []
@@ -80,6 +80,91 @@ function normalizeWorkerNames(input: any): string[] {
   return out
 }
 
+// 人工 (man_days) の正規化: 0〜1の範囲にクランプ、空欄は1
+function clampManDays(v: any): number {
+  if (v == null || v === '') return 1.0
+  const n = Number(v)
+  if (!isFinite(n)) return 1.0
+  if (n < 0) return 0
+  if (n > 1) return 1.0
+  return n
+}
+
+// 人員配列の正規化: [{name, man_days}] 形式を返す
+// 入力許容形式:
+//   - [{name:'A', man_days:1}, ...]
+//   - ['A','B','C']           ← 旧形式 (各1人工で扱う)
+//   - 'A、B,C'                 ← 旧文字列形式
+//   - null/undefined          ← []
+function normalizeWorkers(input: any, fallbackNames?: any): Array<{name: string, man_days: number}> {
+  let raw: any[] = []
+  if (Array.isArray(input)) raw = input
+  else if (input != null) {
+    // workers が文字列等で来た場合 (通常は来ない)
+    raw = []
+  }
+  // workers が空の場合、フォールバックとして worker_names を使う
+  if (raw.length === 0 && fallbackNames != null) {
+    const names = normalizeWorkerNames(fallbackNames)
+    raw = names.map(n => ({ name: n, man_days: 1.0 }))
+  }
+  const seen = new Set<string>()
+  const out: Array<{name: string, man_days: number}> = []
+  for (const v of raw) {
+    if (v == null) continue
+    let name = ''
+    let md: any = 1.0
+    if (typeof v === 'string') {
+      name = v.trim()
+      md = 1.0
+    } else if (typeof v === 'object') {
+      name = String(v.name ?? v.worker_name ?? '').trim()
+      md = v.man_days ?? v.manDays ?? 1.0
+    } else {
+      continue
+    }
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    out.push({ name, man_days: clampManDays(md) })
+  }
+  return out
+}
+
+// DB保存値から workers 配列を取得 (workers_json 優先、なければ worker_names から復元)
+function parseStoredWorkers(workersJson: any, workerNamesStored: any): Array<{name: string, man_days: number}> {
+  // workers_json があればそれを使う
+  if (workersJson != null) {
+    let parsed: any = workersJson
+    if (typeof workersJson === 'string') {
+      const s = workersJson.trim()
+      if (s) {
+        try { parsed = JSON.parse(s) } catch { parsed = null }
+      } else { parsed = null }
+    }
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const out: Array<{name: string, man_days: number}> = []
+      const seen = new Set<string>()
+      for (const v of parsed) {
+        if (v == null) continue
+        let name = ''
+        let md: any = 1.0
+        if (typeof v === 'string') { name = v.trim(); md = 1.0 }
+        else if (typeof v === 'object') {
+          name = String(v.name ?? v.worker_name ?? '').trim()
+          md = v.man_days ?? v.manDays ?? 1.0
+        }
+        if (!name || seen.has(name)) continue
+        seen.add(name)
+        out.push({ name, man_days: clampManDays(md) })
+      }
+      if (out.length > 0) return out
+    }
+  }
+  // フォールバック: worker_names (各1人工)
+  const names = parseStoredWorkerNames(workerNamesStored)
+  return names.map(n => ({ name: n, man_days: 1.0 }))
+}
+
 // workers マスタに upsert し、worker_id を返す
 async function upsertWorker(db: D1Database, name: string): Promise<number | null> {
   if (!name) return null
@@ -92,15 +177,15 @@ async function upsertWorker(db: D1Database, name: string): Promise<number | null
   }
 }
 
-// 加工記録に対する人員リレーションを書き直し
-async function rewriteRecordWorkers(db: D1Database, recordId: number, date: string, factory: string, names: string[]) {
+// 加工記録に対する人員リレーションを書き直し (man_days込み)
+async function rewriteRecordWorkers(db: D1Database, recordId: number, date: string, factory: string, workers: Array<{name: string, man_days: number}>) {
   await db.prepare('DELETE FROM processing_record_workers WHERE processing_record_id = ?').bind(recordId).run()
-  for (const name of names) {
-    const wid = await upsertWorker(db, name)
+  for (const w of workers) {
+    const wid = await upsertWorker(db, w.name)
     await db.prepare(`
-      INSERT INTO processing_record_workers (processing_record_id, worker_id, worker_name, factory, date)
-      VALUES (?, ?, ?, ?, ?)
-    `).bind(recordId, wid, name, factory, date).run()
+      INSERT INTO processing_record_workers (processing_record_id, worker_id, worker_name, factory, date, man_days)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(recordId, wid, w.name, factory, date, w.man_days).run()
   }
 }
 
@@ -119,8 +204,9 @@ function parseStoredWorkerNames(v: any): string[] {
 }
 
 function enrichRecord(r: any) {
-  const names = parseStoredWorkerNames(r?.worker_names)
-  return { ...r, worker_names: names }
+  const workers = parseStoredWorkers(r?.workers_json, r?.worker_names)
+  const names = workers.map(w => w.name)
+  return { ...r, worker_names: names, workers }
 }
 
 // 一覧取得 (絞り込み)
@@ -180,31 +266,34 @@ api.post('/records', authMiddleware, async (c) => {
     return c.json({ error: `${body.date} の ${body.factory} のデータは既に登録されています (ID: ${(dup as any).id})` }, 409)
   }
 
-  // 人員名処理 (人員名があれば人員数を自動算出)
-  const workerNames = normalizeWorkerNames(body.worker_names)
-  const staffCount = workerNames.length > 0 ? workerNames.length : (Number(body.staff_count) || 0)
+  // 人員処理 (workers配列があれば人工合計を staff_count に、なければ worker_names → 1人工換算 → なければ手入力)
+  const workers = normalizeWorkers(body.workers, body.worker_names)
+  const manDaysSum = workers.reduce((s, w) => s + (Number(w.man_days) || 0), 0)
+  const staffCount = workers.length > 0 ? manDaysSum : (Number(body.staff_count) || 0)
   const recordForCalc = { ...body, staff_count: staffCount }
   const { total_qty, qty_per_person } = calcTotals(recordForCalc)
+  const workerNamesArr = workers.map(w => w.name) // 後方互換用
 
   const result = await c.env.DB.prepare(`
     INSERT INTO processing_records
-    (date, factory, staff_count, foundation_qty, base_qty, column_qty, beam_qty, fukashi_qty, slab_qty, doma_qty, civil_qty, wooden_qty, other_qty, total_qty, qty_per_person, note, created_by, worker_names)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (date, factory, staff_count, foundation_qty, base_qty, column_qty, beam_qty, fukashi_qty, slab_qty, doma_qty, civil_qty, wooden_qty, other_qty, total_qty, qty_per_person, note, created_by, worker_names, workers_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     body.date, body.factory, staffCount,
     Number(body.foundation_qty) || 0, Number(body.base_qty) || 0, Number(body.column_qty) || 0,
     Number(body.beam_qty) || 0, Number(body.fukashi_qty) || 0, Number(body.slab_qty) || 0,
     Number(body.doma_qty) || 0, Number(body.civil_qty) || 0, Number(body.wooden_qty) || 0,
     Number(body.other_qty) || 0, total_qty, qty_per_person, body.note || null, user.id,
-    workerNames.length ? JSON.stringify(workerNames) : null
+    workerNamesArr.length ? JSON.stringify(workerNamesArr) : null,
+    workers.length ? JSON.stringify(workers) : null
   ).run()
 
   const recordId = Number(result.meta.last_row_id)
-  if (workerNames.length) {
-    await rewriteRecordWorkers(c.env.DB, recordId, body.date, body.factory, workerNames)
+  if (workers.length) {
+    await rewriteRecordWorkers(c.env.DB, recordId, body.date, body.factory, workers)
   }
 
-  return c.json({ id: recordId, total_qty, qty_per_person, staff_count: staffCount, worker_names: workerNames })
+  return c.json({ id: recordId, total_qty, qty_per_person, staff_count: staffCount, worker_names: workerNamesArr, workers })
 })
 
 // 更新
@@ -217,16 +306,18 @@ api.put('/records/:id', authMiddleware, async (c) => {
   if (user.role !== 'admin' && (existing as any).created_by !== user.id) {
     return c.json({ error: '権限がありません' }, 403)
   }
-  const workerNames = normalizeWorkerNames(body.worker_names)
-  const staffCount = workerNames.length > 0 ? workerNames.length : (Number(body.staff_count) || 0)
+  const workers = normalizeWorkers(body.workers, body.worker_names)
+  const manDaysSum = workers.reduce((s, w) => s + (Number(w.man_days) || 0), 0)
+  const staffCount = workers.length > 0 ? manDaysSum : (Number(body.staff_count) || 0)
   const recordForCalc = { ...body, staff_count: staffCount }
   const { total_qty, qty_per_person } = calcTotals(recordForCalc)
+  const workerNamesArr = workers.map(w => w.name)
 
   await c.env.DB.prepare(`
     UPDATE processing_records SET
       date=?, factory=?, staff_count=?, foundation_qty=?, base_qty=?, column_qty=?, beam_qty=?,
       fukashi_qty=?, slab_qty=?, doma_qty=?, civil_qty=?, wooden_qty=?, other_qty=?,
-      total_qty=?, qty_per_person=?, note=?, worker_names=?, updated_at=CURRENT_TIMESTAMP
+      total_qty=?, qty_per_person=?, note=?, worker_names=?, workers_json=?, updated_at=CURRENT_TIMESTAMP
     WHERE id=?
   `).bind(
     body.date, body.factory, staffCount,
@@ -234,12 +325,14 @@ api.put('/records/:id', authMiddleware, async (c) => {
     Number(body.beam_qty) || 0, Number(body.fukashi_qty) || 0, Number(body.slab_qty) || 0,
     Number(body.doma_qty) || 0, Number(body.civil_qty) || 0, Number(body.wooden_qty) || 0,
     Number(body.other_qty) || 0, total_qty, qty_per_person, body.note || null,
-    workerNames.length ? JSON.stringify(workerNames) : null, id
+    workerNamesArr.length ? JSON.stringify(workerNamesArr) : null,
+    workers.length ? JSON.stringify(workers) : null,
+    id
   ).run()
 
-  await rewriteRecordWorkers(c.env.DB, Number(id), body.date, body.factory, workerNames)
+  await rewriteRecordWorkers(c.env.DB, Number(id), body.date, body.factory, workers)
 
-  return c.json({ ok: true, total_qty, qty_per_person, staff_count: staffCount, worker_names: workerNames })
+  return c.json({ ok: true, total_qty, qty_per_person, staff_count: staffCount, worker_names: workerNamesArr, workers })
 })
 
 // 削除 (管理者のみ)
@@ -430,7 +523,10 @@ api.post('/targets', authMiddleware, requireAdmin, async (c) => {
 })
 
 // ==== 人員別分析 ====
-// 各人の参加日数、関わった総加工量、部位別按分、工場別を集計
+// 各人の参加日数、関わった総加工量、部位別按分、工場別を集計 (man_days考慮)
+// 計算式: 各人の加工数量 = (total_qty / staff_count) × その人のman_days
+//   ※staff_count = man_daysの合計 (workersがある場合)
+//   ※workersが無い古いデータは man_days=1.0, staff_count=name数で互換動作
 api.get('/analytics/workers', authMiddleware, async (c) => {
   const url = new URL(c.req.url)
   const dateFrom = url.searchParams.get('dateFrom') || ''
@@ -438,13 +534,15 @@ api.get('/analytics/workers', authMiddleware, async (c) => {
   const year = url.searchParams.get('year') || ''
   const month = url.searchParams.get('month') || ''
   const factory = url.searchParams.get('factory') || 'all'
-  const workerNameFilter = url.searchParams.get('worker') || ''
+  const workerNameFilter = url.searchParams.get('worker') || url.searchParams.get('worker_name') || ''
 
-  // processing_record_workers と processing_records を結合
-  const partSums = PART_KEYS.map(k => `r.${k} * 1.0 / NULLIF(r.staff_count, 0) as part_${k}`).join(', ')
+  // 1人工あたりの加工量 = r.total_qty / r.staff_count
+  // 各人の加工量 = 1人工あたり × prw.man_days
+  const partSums = PART_KEYS.map(k => `(r.${k} * 1.0 / NULLIF(r.staff_count, 0)) * COALESCE(prw.man_days, 1.0) as part_${k}`).join(', ')
   let sql = `
     SELECT prw.worker_name as worker_name, prw.factory as factory, prw.date as date,
-           r.total_qty * 1.0 / NULLIF(r.staff_count, 0) as person_qty,
+           COALESCE(prw.man_days, 1.0) as man_days,
+           (r.total_qty * 1.0 / NULLIF(r.staff_count, 0)) * COALESCE(prw.man_days, 1.0) as person_qty,
            r.staff_count as staff_count,
            ${partSums}
     FROM processing_record_workers prw
@@ -457,7 +555,7 @@ api.get('/analytics/workers', authMiddleware, async (c) => {
   if (year) { sql += ` AND substr(prw.date,1,4) = ?`; params.push(year) }
   if (month) { sql += ` AND substr(prw.date,6,2) = ?`; params.push(month.padStart(2,'0')) }
   if (factory && factory !== 'all') { sql += ' AND prw.factory = ?'; params.push(factory) }
-  if (workerNameFilter) { sql += ' AND prw.worker_name = ?'; params.push(workerNameFilter) }
+  if (workerNameFilter) { sql += ' AND prw.worker_name LIKE ?'; params.push('%' + workerNameFilter + '%') }
 
   const { results } = await c.env.DB.prepare(sql).bind(...params).all()
   const rows = results as any[]
@@ -470,18 +568,23 @@ api.get('/analytics/workers', authMiddleware, async (c) => {
       aggMap.set(name, {
         worker_name: name,
         days: 0,
+        man_days_total: 0,
         total_qty: 0,
         honsha_qty: 0,
         dai2_qty: 0,
+        honsha_man_days: 0,
+        dai2_man_days: 0,
         dates: new Set<string>(),
         ...Object.fromEntries(PART_KEYS.map(k => [k, 0]))
       })
     }
     const a = aggMap.get(name)
     const q = Number(r.person_qty) || 0
+    const md = Number(r.man_days) || 0
     a.total_qty += q
-    if (r.factory === '本社工場') a.honsha_qty += q
-    else if (r.factory === '第二工場') a.dai2_qty += q
+    a.man_days_total += md
+    if (r.factory === '本社工場') { a.honsha_qty += q; a.honsha_man_days += md }
+    else if (r.factory === '第二工場') { a.dai2_qty += q; a.dai2_man_days += md }
     a.dates.add(r.date)
     for (const k of PART_KEYS) {
       a[k] += Number(r['part_' + k]) || 0
@@ -492,10 +595,14 @@ api.get('/analytics/workers', authMiddleware, async (c) => {
     return {
       worker_name: a.worker_name,
       days,
+      man_days_total: a.man_days_total,
       total_qty: a.total_qty,
       avg_daily_qty: days > 0 ? a.total_qty / days : 0,
+      qty_per_man_day: a.man_days_total > 0 ? a.total_qty / a.man_days_total : 0,
       honsha_qty: a.honsha_qty,
       dai2_qty: a.dai2_qty,
+      honsha_man_days: a.honsha_man_days,
+      dai2_man_days: a.dai2_man_days,
       ...Object.fromEntries(PART_KEYS.map(k => [k, a[k]]))
     }
   })
@@ -505,15 +612,17 @@ api.get('/analytics/workers', authMiddleware, async (c) => {
   return c.json({ data })
 })
 
-// 月別 × 人員別 (推移グラフ用)
+// 月別 × 人員別 (推移グラフ用) — man_days考慮
 api.get('/analytics/workers/monthly', authMiddleware, async (c) => {
   const url = new URL(c.req.url)
   const year = url.searchParams.get('year') || String(new Date().getFullYear())
   const factory = url.searchParams.get('factory') || 'all'
+  const workerNameFilter = url.searchParams.get('worker') || url.searchParams.get('worker_name') || ''
 
   let sql = `
     SELECT prw.worker_name as worker_name, substr(prw.date,1,7) as ym,
-           SUM(r.total_qty * 1.0 / NULLIF(r.staff_count, 0)) as person_qty,
+           SUM((r.total_qty * 1.0 / NULLIF(r.staff_count, 0)) * COALESCE(prw.man_days, 1.0)) as person_qty,
+           SUM(COALESCE(prw.man_days, 1.0)) as man_days_total,
            COUNT(DISTINCT prw.date) as days
     FROM processing_record_workers prw
     JOIN processing_records r ON r.id = prw.processing_record_id
@@ -521,6 +630,7 @@ api.get('/analytics/workers/monthly', authMiddleware, async (c) => {
   `
   const params: any[] = [year]
   if (factory && factory !== 'all') { sql += ' AND prw.factory = ?'; params.push(factory) }
+  if (workerNameFilter) { sql += ' AND prw.worker_name LIKE ?'; params.push('%' + workerNameFilter + '%') }
   sql += ' GROUP BY prw.worker_name, ym ORDER BY ym ASC'
 
   const { results } = await c.env.DB.prepare(sql).bind(...params).all()

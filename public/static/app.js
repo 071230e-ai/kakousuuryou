@@ -124,6 +124,69 @@ function normalizeWorkerNamesClient(v) {
   return out;
 }
 
+// 人工 (man_days) の値を 0〜1 にクランプ (空欄→1, 数値以外→1, 負→0, 1超→1)
+function clampManDaysClient(v) {
+  if (v === '' || v == null) return 1;
+  const n = Number(v);
+  if (!isFinite(n) || isNaN(n)) return 1;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+// 人員配列の正規化: [{name, man_days}] 形式へ
+// 入力候補: workers配列(オブジェクト or 文字列) / worker_names配列 / JSON文字列 / null
+// worker_names のみある古いデータ → 各人 man_days=1.0 として変換
+function normalizeWorkersClient(workers, fallbackNames) {
+  let raw = [];
+  if (workers != null) {
+    if (Array.isArray(workers)) raw = workers;
+    else if (typeof workers === 'string') {
+      const s = workers.trim();
+      if (s.startsWith('[')) {
+        try { raw = JSON.parse(s); } catch { raw = []; }
+      }
+    }
+  }
+  // workers が空なら worker_names フォールバック
+  if (raw.length === 0 && fallbackNames != null) {
+    const names = normalizeWorkerNamesClient(fallbackNames);
+    raw = names.map(n => ({ name: n, man_days: 1 }));
+  }
+  const seen = new Set();
+  const out = [];
+  for (const v of raw) {
+    if (v == null) continue;
+    let name = '', md = 1;
+    if (typeof v === 'string') { name = v.trim(); md = 1; }
+    else if (typeof v === 'object') {
+      name = String(v.name ?? v.worker_name ?? '').trim();
+      md = v.man_days ?? v.manDays ?? 1;
+    } else { continue; }
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ name, man_days: clampManDaysClient(md) });
+  }
+  return out;
+}
+
+// 人工合計を計算 (空名は除外)
+function sumManDays(workers) {
+  if (!Array.isArray(workers)) return 0;
+  return workers.reduce((s, w) => {
+    if (!w || !String(w.name || '').trim()) return s;
+    return s + clampManDaysClient(w.man_days);
+  }, 0);
+}
+
+// 人工を見やすく整形 (1.0 → '1.0', 0.5 → '0.5', 2.5 → '2.5')
+function fmtManDays(v) {
+  const n = Number(v);
+  if (!isFinite(n)) return '0';
+  // 小数点1桁を基本に、ぴったり整数でも .0 を表示
+  return n.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+}
+
 // ========== ユーティリティ ==========
 const fmt = {
   num(n) {
@@ -471,12 +534,12 @@ async function renderDashboard() {
         <div class="stat-card all">
           <div class="label"><i class="fas fa-calendar-day mr-1"></i>今日 (${dayjs(data.today.date).format('YYYY/MM/DD')})</div>
           <div class="value">${fmt.qty(todayTotal)}</div>
-          <div class="sub">人員 ${todayStaff}人 / 1人あたり ${todayStaff>0?fmt.qty(todayTotal/todayStaff):'-'}</div>
+          <div class="sub">人工合計 ${fmtManDays(todayStaff)} / 1人工あたり ${todayStaff>0?fmt.qty(todayTotal/todayStaff):'-'}</div>
         </div>
         <div class="stat-card all">
           <div class="label"><i class="fas fa-calendar-alt mr-1"></i>今月 (${dayjs(data.month.ym+'-01').format('YYYY年M月')})</div>
           <div class="value">${fmt.qty(monthTotal)}</div>
-          <div class="sub">稼働${monthDays}日 / 延べ${monthStaff}人 / 1人あたり ${monthStaff>0?fmt.qty(monthTotal/monthStaff):'-'}</div>
+          <div class="sub">稼働${monthDays}日 / 延べ${fmtManDays(monthStaff)}人工 / 1人工あたり ${monthStaff>0?fmt.qty(monthTotal/monthStaff):'-'}</div>
         </div>
         <div class="stat-card all">
           <div class="label"><i class="fas fa-calendar mr-1"></i>今年 (${data.year.year}年)</div>
@@ -644,10 +707,11 @@ function renderInput(record = null) {
     foundation_qty:'', base_qty:'', column_qty:'', beam_qty:'', fukashi_qty:'',
     slab_qty:'', doma_qty:'', civil_qty:'', wooden_qty:'', other_qty:'',
     note: '',
-    worker_names: []
+    worker_names: [],
+    workers: []
   };
-  // ローカルの人員名リスト (UIで動的編集)
-  let workerNames = normalizeWorkerNamesClient(r.worker_names);
+  // ローカルの人員リスト (UIで動的編集): [{name, man_days}]
+  let workers = normalizeWorkersClient(r.workers, r.worker_names);
   const main = document.getElementById('main');
   main.innerHTML = `
     <div class="max-w-3xl mx-auto">
@@ -669,8 +733,8 @@ function renderInput(record = null) {
             </select>
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">人員数 <span id="staffAutoBadge" class="text-xs text-blue-600 hidden">(人員名から自動計算)</span></label>
-            <input id="staff_count" type="number" min="0" step="1" value="${r.staff_count||''}" class="input-num" placeholder="例: 8" inputmode="numeric" />
+            <label class="block text-sm font-medium text-gray-700 mb-1">人員数（人工合計） <span id="staffAutoBadge" class="text-xs text-blue-600 hidden">(人工合計から自動計算)</span></label>
+            <input id="staff_count" type="number" min="0" step="0.25" value="${r.staff_count||''}" class="input-num" placeholder="例: 2.5" inputmode="decimal" />
           </div>
         </div>
 
@@ -683,7 +747,7 @@ function renderInput(record = null) {
               <i class="fas fa-plus mr-1"></i>人員を追加
             </button>
           </div>
-          <p class="text-xs text-gray-600 mb-2">人員名を入力すると、人員数は自動的に名前の人数になります。空のままなら「人員数」欄を手入力できます。</p>
+          <p class="text-xs text-gray-600 mb-2">人員名と人工（1日=1.0、半日=0.5、四半日=0.25）を入力してください。人工合計が「人員数」に自動セットされます。空欄なら「人員数」欄を手入力できます。</p>
           <div id="workerList" class="space-y-2"></div>
         </div>
 
@@ -717,7 +781,7 @@ function renderInput(record = null) {
             <p id="totalDisplay" class="text-2xl font-bold text-blue-700">0 kg</p>
           </div>
           <div>
-            <p class="text-sm text-gray-600">1人あたり加工数量</p>
+            <p class="text-sm text-gray-600">1人工あたり加工数量</p>
             <p id="perDisplay" class="text-2xl font-bold text-green-700">0 kg</p>
           </div>
         </div>
@@ -739,50 +803,81 @@ function renderInput(record = null) {
     </div>
   `;
 
-  // 人員名 UI の描画 (workerNames配列とDOMを同期)
+  // 人員 UI の描画 (workers配列とDOMを同期)
   const renderWorkerList = () => {
     const list = document.getElementById('workerList');
     if (!list) return;
-    if (workerNames.length === 0) {
-      list.innerHTML = `<p class="text-sm text-gray-500 italic py-2">人員名は未入力です（人員数は手入力できます）</p>`;
+    if (workers.length === 0) {
+      list.innerHTML = `<p class="text-sm text-gray-500 italic py-2">人員は未入力です（人員数は手入力できます）</p>`;
     } else {
-      list.innerHTML = workerNames.map((name, i) => `
-        <div class="flex gap-2 items-center">
-          <input type="text" data-worker-idx="${i}" value="${escapeHtml(name)}" placeholder="人員名" class="input-base flex-1" />
-          <button type="button" data-worker-del="${i}" class="btn-danger text-sm whitespace-nowrap" title="削除">
+      list.innerHTML = workers.map((w, i) => `
+        <div class="flex flex-col sm:flex-row gap-2 sm:items-center bg-white p-2 rounded border border-indigo-100">
+          <div class="flex-1">
+            <label class="text-xs text-gray-500 sm:hidden">人員名</label>
+            <input type="text" data-worker-name-idx="${i}" value="${escapeHtml(w.name||'')}" placeholder="人員名" class="input-base w-full" />
+          </div>
+          <div class="w-full sm:w-28">
+            <label class="text-xs text-gray-500 sm:hidden">人工</label>
+            <input type="number" data-worker-md-idx="${i}" value="${fmtManDays(w.man_days)}" min="0" max="1" step="0.25" placeholder="1.0" class="input-num w-full" inputmode="decimal" title="人工 (1日=1.0、半日=0.5、四半日=0.25)" />
+          </div>
+          <button type="button" data-worker-del="${i}" class="btn-danger text-sm whitespace-nowrap sm:w-auto" title="削除">
             <i class="fas fa-trash"></i><span class="hidden sm:inline ml-1">削除</span>
           </button>
         </div>
       `).join('');
     }
-    // バインド
-    list.querySelectorAll('[data-worker-idx]').forEach(inp => {
+    // 人員名入力
+    list.querySelectorAll('[data-worker-name-idx]').forEach(inp => {
       inp.addEventListener('input', (e) => {
-        const idx = Number(e.target.dataset.workerIdx);
-        workerNames[idx] = e.target.value;
-        // 入力中は staff_count を即時更新 (空白は配列にカウントするが trim 後の長さでOK)
+        const idx = Number(e.target.dataset.workerNameIdx);
+        if (workers[idx]) workers[idx].name = e.target.value;
         syncStaffFromWorkers();
         recalc();
       });
     });
+    // 人工入力
+    list.querySelectorAll('[data-worker-md-idx]').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const idx = Number(e.target.dataset.workerMdIdx);
+        if (workers[idx]) workers[idx].man_days = e.target.value; // 値の正規化は送信/集計時
+        syncStaffFromWorkers();
+        recalc();
+      });
+      inp.addEventListener('blur', (e) => {
+        const idx = Number(e.target.dataset.workerMdIdx);
+        if (workers[idx]) {
+          workers[idx].man_days = clampManDaysClient(e.target.value);
+          e.target.value = fmtManDays(workers[idx].man_days);
+        }
+        syncStaffFromWorkers();
+        recalc();
+      });
+    });
+    // 削除
     list.querySelectorAll('[data-worker-del]').forEach(btn => {
       btn.addEventListener('click', (e) => {
         const idx = Number(e.currentTarget.dataset.workerDel);
-        workerNames.splice(idx, 1);
+        workers.splice(idx, 1);
         renderWorkerList();
         syncStaffFromWorkers();
         recalc();
       });
     });
-    document.getElementById('workerCount').textContent = workerNames.filter(n => String(n||'').trim()).length > 0
-      ? `(${workerNames.filter(n => String(n||'').trim()).length}人)` : '';
+    // 人員名（3人 / 2.5人工） 表示
+    const nameCount = workers.filter(w => String(w.name||'').trim()).length;
+    const mdSum = sumManDays(workers);
+    const wcEl = document.getElementById('workerCount');
+    if (wcEl) {
+      wcEl.textContent = nameCount > 0 ? `（${nameCount}人 / ${fmtManDays(mdSum)}人工）` : '';
+    }
   };
   const syncStaffFromWorkers = () => {
-    const filled = workerNames.filter(n => String(n||'').trim()).length;
+    const nameCount = workers.filter(w => String(w.name||'').trim()).length;
+    const mdSum = sumManDays(workers);
     const staffInput = document.getElementById('staff_count');
     const badge = document.getElementById('staffAutoBadge');
-    if (filled > 0) {
-      staffInput.value = filled;
+    if (nameCount > 0) {
+      staffInput.value = fmtManDays(mdSum);
       staffInput.readOnly = true;
       staffInput.classList.add('bg-gray-100', 'cursor-not-allowed');
       badge.classList.remove('hidden');
@@ -794,13 +889,13 @@ function renderInput(record = null) {
   };
 
   document.getElementById('addWorkerBtn').addEventListener('click', () => {
-    workerNames.push('');
+    workers.push({ name: '', man_days: 1 });
     renderWorkerList();
     syncStaffFromWorkers();
     // 直後に新しい入力欄にフォーカス
     setTimeout(() => {
       const list = document.getElementById('workerList');
-      const inputs = list?.querySelectorAll('input[type="text"]');
+      const inputs = list?.querySelectorAll('input[data-worker-name-idx]');
       if (inputs && inputs.length) inputs[inputs.length - 1].focus();
     }, 0);
   });
@@ -811,6 +906,7 @@ function renderInput(record = null) {
   const recalc = () => {
     let total = 0;
     PART_KEYS.forEach(k => { total += safeNum(document.getElementById(k).value); });
+    // 人員名入力時は人工合計を staff_count に同期済み (syncStaffFromWorkers)。手入力時は staff_count を参照。
     const staff = safeNum(document.getElementById('staff_count').value);
     const per = staff > 0 ? total / staff : 0;
     document.getElementById('totalDisplay').textContent = fmt.num(total) + ' kg';
@@ -827,11 +923,11 @@ function renderInput(record = null) {
       const prev = await api.previousRecord(date, factory);
       if (!prev) { alert('過去データがありません'); return; }
       PART_KEYS.forEach(k => { document.getElementById(k).value = prev[k] || ''; });
-      // 人員名もコピー
-      workerNames = normalizeWorkerNamesClient(prev.worker_names);
+      // 人員名と人工をコピー (日付は今日のまま)
+      workers = normalizeWorkersClient(prev.workers, prev.worker_names);
       renderWorkerList();
-      // 人員数は人員名から自動算出、無ければ前回の値を使用
-      if (workerNames.length === 0) {
+      // 人員未入力なら人員数は前回値、入力済みなら人工合計を自動セット
+      if (workers.length === 0) {
         document.getElementById('staff_count').value = prev.staff_count || '';
       }
       syncStaffFromWorkers();
@@ -851,14 +947,16 @@ function renderInput(record = null) {
   document.getElementById('recordForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     if (state.useSampleData) { alert('プレビューモードでは登録できません'); return; }
-    // 入力中の人員名をスナップショット (空白除去)
-    const cleanWorkers = normalizeWorkerNamesClient(workerNames);
+    // 入力中の人員をスナップショット (空白除去・man_days正規化)
+    const cleanWorkers = normalizeWorkersClient(workers);
     const data = {
       date: document.getElementById('date').value,
       factory: document.getElementById('factory').value,
       staff_count: document.getElementById('staff_count').value,
       note: document.getElementById('note').value,
-      worker_names: cleanWorkers
+      workers: cleanWorkers,
+      // 後方互換: workers が空のときも worker_names を送る
+      worker_names: cleanWorkers.map(w => w.name)
     };
     PART_KEYS.forEach(k => { data[k] = document.getElementById(k).value; });
     const err = document.getElementById('formError');
@@ -874,7 +972,7 @@ function renderInput(record = null) {
         alert('登録しました');
         document.getElementById('recordForm').reset();
         document.getElementById('date').value = dayjs().format('YYYY-MM-DD');
-        workerNames = [];
+        workers = [];
         renderWorkerList();
         syncStaffFromWorkers();
         recalc();
@@ -1002,9 +1100,9 @@ function renderListTable() {
     <table class="data-table">
       <thead>
         <tr>
-          <th>日付</th><th>工場</th><th>人員</th><th>人員名</th>
+          <th>日付</th><th>工場</th><th>人工合計</th><th>人員名（人工）</th>
           ${PART_KEYS.map(k=>`<th class="part-${k.replace('_qty','')}">${PART_LABELS[k]}</th>`).join('')}
-          <th>総加工量</th><th>1人あたり</th><th>備考</th><th class="no-print">操作</th>
+          <th>総加工量</th><th>1人工あたり</th><th>備考</th><th class="no-print">操作</th>
         </tr>
       </thead>
       <tbody>
@@ -1013,14 +1111,14 @@ function renderListTable() {
           const lowQty = total > 0 && total < 5000;
           const per = safeNum(r.qty_per_person);
           const highPer = per > 0 && avgPer > 0 && per > avgPer * 1.2;
-          const wn = normalizeWorkerNamesClient(r.worker_names);
-          const wnHtml = wn.length
-            ? wn.map(n => `<span class="inline-block px-1.5 py-0.5 bg-indigo-100 text-indigo-800 rounded text-xs mr-1 mb-1">${escapeHtml(n)}</span>`).join('')
+          const wlist = normalizeWorkersClient(r.workers, r.worker_names);
+          const wnHtml = wlist.length
+            ? wlist.map(w => `<span class="inline-block px-1.5 py-0.5 bg-indigo-100 text-indigo-800 rounded text-xs mr-1 mb-1">${escapeHtml(w.name)}<span class="ml-1 text-indigo-600">(${fmtManDays(w.man_days)})</span></span>`).join('')
             : '<span class="text-gray-400 text-xs">-</span>';
           return `<tr class="${lowQty?'low-qty':''} ${highPer?'high-perperson':''}">
             <td class="text">${fmt.date(r.date)}</td>
             <td class="text"><span class="px-2 py-1 rounded text-xs ${r.factory==='本社工場'?'badge-honsha':'badge-dai2'}">${escapeHtml(r.factory||'')}</span></td>
-            <td>${safeNum(r.staff_count)}</td>
+            <td>${fmtManDays(safeNum(r.staff_count))}</td>
             <td class="text text-xs" style="min-width:140px">${wnHtml}</td>
             ${PART_KEYS.map(k=>`<td>${fmt.qty(r[k])}</td>`).join('')}
             <td class="font-bold">${fmt.qty(total)}</td>
@@ -1131,15 +1229,15 @@ async function renderDaily() {
     tableEl.innerHTML = `
       <table class="data-table">
         <thead><tr>
-          <th>日付</th><th>工場</th><th>人員</th>
+          <th>日付</th><th>工場</th><th>人工合計</th>
           ${PART_KEYS.map(k=>`<th>${PART_LABELS[k]}</th>`).join('')}
-          <th>合計</th><th>1人あたり</th>
+          <th>合計</th><th>1人工あたり</th>
         </tr></thead>
         <tbody>
           ${data.map(r => `<tr>
             <td class="text">${fmt.date(r.date)}</td>
             <td class="text"><span class="px-2 py-1 rounded text-xs ${r.factory==='本社工場'?'badge-honsha':'badge-dai2'}">${escapeHtml(r.factory||'')}</span></td>
-            <td>${safeNum(r.staff_count)}</td>
+            <td>${fmtManDays(safeNum(r.staff_count))}</td>
             ${PART_KEYS.map(k=>`<td>${fmt.qty(r[k])}</td>`).join('')}
             <td class="font-bold">${fmt.qty(r.total_qty)}</td>
             <td>${safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person):'-'}</td>
@@ -1247,7 +1345,7 @@ async function renderMonthly() {
     tableEl.innerHTML = `
       <table class="data-table">
         <thead><tr>
-          <th>月</th><th>工場</th><th>稼働日</th><th>延べ人員</th>
+          <th>月</th><th>工場</th><th>稼働日</th><th>延べ人工</th>
           ${PART_KEYS.map(k=>`<th>${PART_LABELS[k]}</th>`).join('')}
           <th>月間合計</th><th>1日平均</th><th>1人平均</th>
         </tr></thead>
@@ -1256,7 +1354,7 @@ async function renderMonthly() {
             <td class="text">${dayjs(r.ym+'-01').format('YYYY/M月')}</td>
             <td class="text"><span class="px-2 py-1 rounded text-xs ${r.factory==='本社工場'?'badge-honsha':'badge-dai2'}">${escapeHtml(r.factory||'')}</span></td>
             <td>${safeNum(r.days)}</td>
-            <td>${safeNum(r.staff_count)}</td>
+            <td>${fmtManDays(safeNum(r.staff_count))}</td>
             ${PART_KEYS.map(k=>`<td>${fmt.qty(r[k])}</td>`).join('')}
             <td class="font-bold">${fmt.qty(r.total_qty)}</td>
             <td>${fmt.qty(r.avg_daily_qty)}</td>
@@ -1327,7 +1425,7 @@ async function renderYearly() {
           <div class="relative" style="height:320px"><canvas id="yearlyChart"></canvas></div>
         </div>
         <div class="bg-white p-4 rounded-xl shadow-sm">
-          <h3 class="font-semibold mb-2">月別推移 (1人あたり)</h3>
+          <h3 class="font-semibold mb-2">月別推移 (1人工あたり)</h3>
           <div class="relative" style="height:320px"><canvas id="trendChart"></canvas></div>
         </div>
       </div>
@@ -1386,8 +1484,8 @@ async function renderYearly() {
     const perHonsha = yms.map(ym => monthly.find(x=>x.ym===ym && x.factory==='本社工場')?.qty_per_person||0);
     const perDai2 = yms.map(ym => monthly.find(x=>x.ym===ym && x.factory==='第二工場')?.qty_per_person||0);
     const trendDs = [];
-    if (factory==='all'||factory==='本社工場') trendDs.push({ label:'本社工場 1人あたり', data:perHonsha.map(fmt.qtyVal), borderColor:FACTORY_COLORS['本社工場'], backgroundColor:FACTORY_COLORS['本社工場']+'33', fill: false, tension: 0.2 });
-    if (factory==='all'||factory==='第二工場') trendDs.push({ label:'第二工場 1人あたり', data:perDai2.map(fmt.qtyVal), borderColor:FACTORY_COLORS['第二工場'], backgroundColor:FACTORY_COLORS['第二工場']+'33', fill: false, tension: 0.2 });
+    if (factory==='all'||factory==='本社工場') trendDs.push({ label:'本社工場 1人工あたり', data:perHonsha.map(fmt.qtyVal), borderColor:FACTORY_COLORS['本社工場'], backgroundColor:FACTORY_COLORS['本社工場']+'33', fill: false, tension: 0.2 });
+    if (factory==='all'||factory==='第二工場') trendDs.push({ label:'第二工場 1人工あたり', data:perDai2.map(fmt.qtyVal), borderColor:FACTORY_COLORS['第二工場'], backgroundColor:FACTORY_COLORS['第二工場']+'33', fill: false, tension: 0.2 });
     if (monthly.length > 0) {
       safeCreateChart('trendChart', {
         type: 'line',
@@ -1413,16 +1511,16 @@ async function renderYearly() {
     tableEl.innerHTML = `
       <table class="data-table">
         <thead><tr>
-          <th>年</th><th>工場</th><th>稼働日</th><th>延べ人員</th>
+          <th>年</th><th>工場</th><th>稼働日</th><th>延べ人工</th>
           ${PART_KEYS.map(k=>`<th>${PART_LABELS[k]}</th>`).join('')}
-          <th>年間合計</th><th>1人あたり</th>
+          <th>年間合計</th><th>1人工あたり</th>
         </tr></thead>
         <tbody>
           ${data.map(r => `<tr>
             <td class="text">${r.year}年</td>
             <td class="text"><span class="px-2 py-1 rounded text-xs ${r.factory==='本社工場'?'badge-honsha':'badge-dai2'}">${escapeHtml(r.factory||'')}</span></td>
             <td>${safeNum(r.days)}</td>
-            <td>${safeNum(r.staff_count)}</td>
+            <td>${fmtManDays(safeNum(r.staff_count))}</td>
             ${PART_KEYS.map(k=>`<td>${fmt.qty(r[k])}</td>`).join('')}
             <td class="font-bold">${fmt.qty(r.total_qty)}</td>
             <td>${safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person):'-'}</td>
@@ -1507,8 +1605,8 @@ async function renderCompare() {
     const dai2Staff = sumKey(dai2, 'staff_count');
 
     document.getElementById('compareKpi').innerHTML = `
-      <div class="stat-card honsha"><div class="label">本社工場 (${year}年)</div><div class="value text-blue-700">${fmt.qty(honshaTotal)}</div><div class="sub">延べ${honshaStaff}人 / 1人あたり ${honshaStaff>0?fmt.qty(honshaTotal/honshaStaff):'-'}</div></div>
-      <div class="stat-card dai2"><div class="label">第二工場 (${year}年)</div><div class="value text-green-700">${fmt.qty(dai2Total)}</div><div class="sub">延べ${dai2Staff}人 / 1人あたり ${dai2Staff>0?fmt.qty(dai2Total/dai2Staff):'-'}</div></div>
+      <div class="stat-card honsha"><div class="label">本社工場 (${year}年)</div><div class="value text-blue-700">${fmt.qty(honshaTotal)}</div><div class="sub">延べ${fmtManDays(honshaStaff)}人工 / 1人工あたり ${honshaStaff>0?fmt.qty(honshaTotal/honshaStaff):'-'}</div></div>
+      <div class="stat-card dai2"><div class="label">第二工場 (${year}年)</div><div class="value text-green-700">${fmt.qty(dai2Total)}</div><div class="sub">延べ${fmtManDays(dai2Staff)}人工 / 1人工あたり ${dai2Staff>0?fmt.qty(dai2Total/dai2Staff):'-'}</div></div>
       <div class="stat-card all"><div class="label">合計</div><div class="value">${fmt.qty(honshaTotal+dai2Total)}</div><div class="sub">本社 ${honshaTotal+dai2Total>0?(honshaTotal/(honshaTotal+dai2Total)*100).toFixed(1):0}% / 第二 ${honshaTotal+dai2Total>0?(dai2Total/(honshaTotal+dai2Total)*100).toFixed(1):0}%</div></div>
     `;
 
@@ -1651,28 +1749,38 @@ function aggregateWorkersLocal(records, { year, month, dateFrom, dateTo, factory
 
   const map = {};
   for (const r of filtered) {
-    const names = normalizeWorkerNamesClient(r.worker_names);
-    if (names.length === 0) continue; // 人員名のない記録は集計対象外
-    const staff = names.length;
+    const wlist = normalizeWorkersClient(r.workers, r.worker_names);
+    if (wlist.length === 0) continue; // 人員のない記録は集計対象外
+    const mdSum = wlist.reduce((s, w) => s + clampManDaysClient(w.man_days), 0);
+    if (mdSum <= 0) continue; // 人工合計0は按分不能のためスキップ
     const total = safeNum(r.total_qty);
-    const perPerson = staff > 0 ? total / staff : 0;
-    for (const name of names) {
+    const perManDay = total / mdSum;
+    for (const w of wlist) {
+      const name = w.name;
+      const md = clampManDaysClient(w.man_days);
+      const personQty = perManDay * md;
       if (!map[name]) {
         map[name] = {
           worker_name: name, days: 0, total_qty: 0,
+          man_days_total: 0, honsha_man_days: 0, dai2_man_days: 0,
           honsha_qty: 0, dai2_qty: 0,
           ...Object.fromEntries(PART_KEYS.map(k => [k, 0]))
         };
       }
       const a = map[name];
       a.days += 1;
-      a.total_qty += perPerson;
-      if (r.factory === '本社工場') a.honsha_qty += perPerson;
-      else if (r.factory === '第二工場') a.dai2_qty += perPerson;
-      PART_KEYS.forEach(k => { a[k] += staff > 0 ? safeNum(r[k]) / staff : 0; });
+      a.man_days_total += md;
+      a.total_qty += personQty;
+      if (r.factory === '本社工場') { a.honsha_qty += personQty; a.honsha_man_days += md; }
+      else if (r.factory === '第二工場') { a.dai2_qty += personQty; a.dai2_man_days += md; }
+      PART_KEYS.forEach(k => { a[k] += (safeNum(r[k]) / mdSum) * md; });
     }
   }
-  let data = Object.values(map).map(a => ({ ...a, avg_daily_qty: a.days > 0 ? a.total_qty / a.days : 0 }));
+  let data = Object.values(map).map(a => ({
+    ...a,
+    avg_daily_qty: a.days > 0 ? a.total_qty / a.days : 0,
+    qty_per_man_day: a.man_days_total > 0 ? a.total_qty / a.man_days_total : 0
+  }));
   if (workerName) {
     const q = String(workerName).trim();
     if (q) data = data.filter(d => d.worker_name.includes(q));
@@ -1688,17 +1796,20 @@ function aggregateWorkersMonthlyLocal(records, { year, factory, workerName }) {
   if (factory && factory !== 'all') filtered = filtered.filter(r => r.factory === factory);
   const map = {};
   for (const r of filtered) {
-    const names = normalizeWorkerNamesClient(r.worker_names);
-    if (names.length === 0) continue;
-    const staff = names.length;
+    const wlist = normalizeWorkersClient(r.workers, r.worker_names);
+    if (wlist.length === 0) continue;
+    const mdSum = wlist.reduce((s, w) => s + clampManDaysClient(w.man_days), 0);
+    if (mdSum <= 0) continue;
     const total = safeNum(r.total_qty);
-    const per = staff > 0 ? total / staff : 0;
+    const perManDay = total / mdSum;
     const ym = String(r.date || '').slice(0,7);
-    for (const name of names) {
-      const key = name + '|' + ym;
-      if (!map[key]) map[key] = { worker_name: name, ym, person_qty: 0, days: 0 };
-      map[key].person_qty += per;
+    for (const w of wlist) {
+      const md = clampManDaysClient(w.man_days);
+      const key = w.name + '|' + ym;
+      if (!map[key]) map[key] = { worker_name: w.name, ym, person_qty: 0, days: 0, man_days_total: 0 };
+      map[key].person_qty += perManDay * md;
       map[key].days += 1;
+      map[key].man_days_total += md;
     }
   }
   let data = Object.values(map);
@@ -1851,14 +1962,15 @@ async function loadWorkerData() {
   // KPI
   const totalQty = sumKey(data, 'total_qty');
   const workerCount = data.length;
-  const avgPerPerson = workerCount > 0 ? totalQty / workerCount : 0;
+  const manDaysTotal = data.reduce((s, d) => s + safeNum(d.man_days_total), 0);
+  const qtyPerManDay = manDaysTotal > 0 ? totalQty / manDaysTotal : 0;
   const topQty = data.length ? data[0] : null;
   const topDays = data.length ? [...data].sort((a,b)=>safeNum(b.days)-safeNum(a.days))[0] : null;
 
   kpiEl.innerHTML = `
-    <div class="stat-card all"><div class="label"><i class="fas fa-weight-hanging mr-1"></i>期間の総加工数量</div><div class="value">${fmt.qty(totalQty)}</div><div class="sub">人員別積算</div></div>
-    <div class="stat-card all"><div class="label"><i class="fas fa-id-badge mr-1"></i>登録人員数</div><div class="value">${workerCount}人</div><div class="sub">期間内に参加した人員</div></div>
-    <div class="stat-card all"><div class="label"><i class="fas fa-balance-scale mr-1"></i>1人あたり平均</div><div class="value">${workerCount>0?fmt.qty(avgPerPerson):'-'}</div><div class="sub">期間中の1人あたり</div></div>
+    <div class="stat-card all"><div class="label"><i class="fas fa-weight-hanging mr-1"></i>期間の総加工数量</div><div class="value">${fmt.qty(totalQty)}</div><div class="sub">人員別按分</div></div>
+    <div class="stat-card all"><div class="label"><i class="fas fa-id-badge mr-1"></i>登録人員数</div><div class="value">${workerCount}人</div><div class="sub">人工合計 ${fmtManDays(manDaysTotal)}人工</div></div>
+    <div class="stat-card all"><div class="label"><i class="fas fa-balance-scale mr-1"></i>1人工あたり平均</div><div class="value">${manDaysTotal>0?fmt.qty(qtyPerManDay):'-'}</div><div class="sub">総加工量÷人工合計</div></div>
     <div class="stat-card honsha"><div class="label"><i class="fas fa-trophy mr-1"></i>最多加工量者</div><div class="value text-blue-700 text-base">${topQty?escapeHtml(topQty.worker_name):'-'}</div><div class="sub">${topQty?fmt.qty(safeNum(topQty.total_qty)):'-'}</div></div>
     <div class="stat-card dai2"><div class="label"><i class="fas fa-medal mr-1"></i>最多参加日数者</div><div class="value text-green-700 text-base">${topDays?escapeHtml(topDays.worker_name):'-'}</div><div class="sub">${topDays?safeNum(topDays.days)+'日':'-'}</div></div>
   `;
@@ -1868,10 +1980,11 @@ async function loadWorkerData() {
     tableEl.innerHTML = `<div class="text-center py-10 text-gray-500"><i class="fas fa-inbox text-4xl mb-2"></i><p>人員データがありません</p><p class="text-xs mt-1">加工実績の入力時に「人員名」を登録するとここに表示されます</p></div>`;
   } else {
     tableEl.innerHTML = `
+      <div class="overflow-x-auto">
       <table class="data-table">
         <thead>
           <tr>
-            <th>人員名</th><th>参加日数</th><th>総加工数量</th><th>1日平均</th>
+            <th>人員名</th><th>参加日数</th><th>人工合計</th><th>総加工数量</th><th>1人工あたり</th><th>1日平均</th>
             <th>本社工場</th><th>第二工場</th>
             ${PART_KEYS.map(k=>`<th class="part-${k.replace('_qty','')}">${PART_LABELS[k]}</th>`).join('')}
           </tr>
@@ -1881,7 +1994,9 @@ async function loadWorkerData() {
             <tr>
               <td class="text font-semibold">${escapeHtml(d.worker_name)}</td>
               <td>${safeNum(d.days)}日</td>
+              <td>${fmtManDays(d.man_days_total)}</td>
               <td class="font-bold">${fmt.qty(d.total_qty)}</td>
+              <td>${safeNum(d.man_days_total)>0?fmt.qty(d.qty_per_man_day):'-'}</td>
               <td>${fmt.qty(d.avg_daily_qty)}</td>
               <td>${fmt.qty(d.honsha_qty)}</td>
               <td>${fmt.qty(d.dai2_qty)}</td>
@@ -1890,6 +2005,7 @@ async function loadWorkerData() {
           `).join('')}
         </tbody>
       </table>
+      </div>
     `;
   }
 
@@ -1975,8 +2091,16 @@ async function loadWorkerData() {
 function exportWorkerCSV() {
   const data = safeArray(_workerDataCache);
   if (data.length === 0) { alert('データがありません'); return; }
-  const keys = ['worker_name','days','total_qty','avg_daily_qty','honsha_qty','dai2_qty', ...PART_KEYS];
-  exportCSV('人員別分析', data, keys);
+  // 人工合計が0でない安全な値で qty_per_man_day を確保
+  const rows = data.map(d => ({
+    ...d,
+    man_days_total: safeNum(d.man_days_total),
+    qty_per_man_day: safeNum(d.man_days_total) > 0 ? safeNum(d.qty_per_man_day) : 0,
+    honsha_man_days: safeNum(d.honsha_man_days),
+    dai2_man_days: safeNum(d.dai2_man_days)
+  }));
+  const keys = ['worker_name','days','man_days_total','total_qty','qty_per_man_day','avg_daily_qty','honsha_qty','dai2_qty','honsha_man_days','dai2_man_days', ...PART_KEYS];
+  exportCSV('人員別分析', rows, keys);
 }
 
 function exportWorkerPDF() {
@@ -2001,10 +2125,12 @@ function exportWorkerPDF() {
     doc.setFontSize(11);
     doc.text('Total Quantity Ranking (Top 10)', 14, 28);
     doc.autoTable({
-      head: [['Rank','Worker','Days','TotalQty','AvgDaily','Honsha','Dai2']],
+      head: [['Rank','Worker','Days','ManDays','TotalQty','PerManDay','AvgDaily','Honsha','Dai2']],
       body: top10.map((d,i) => [
         i+1, d.worker_name, safeNum(d.days),
+        fmtManDays(d.man_days_total),
         fmt.qty(d.total_qty).replace(/\s.*/,''),
+        safeNum(d.man_days_total) > 0 ? fmt.qty(d.qty_per_man_day).replace(/\s.*/,'') : '-',
         fmt.qty(d.avg_daily_qty).replace(/\s.*/,''),
         fmt.qty(d.honsha_qty).replace(/\s.*/,''),
         fmt.qty(d.dai2_qty).replace(/\s.*/,'')
@@ -2033,7 +2159,7 @@ function exportWorkerPDF() {
 function exportCSV(name, rows, keys) {
   rows = safeArray(rows);
   if (rows.length === 0) { alert('データがありません'); return; }
-  const labelMap = { ...PART_LABELS, date:'日付', factory:'工場', staff_count:'人員数', worker_names:'人員名', worker_name:'人員名', total_qty:'総加工量(kg)', qty_per_person:'1人あたり(kg)', ym:'年月', year:'年', days:'稼働日', avg_daily_qty:'1日平均(kg)', honsha_qty:'本社工場(kg)', dai2_qty:'第二工場(kg)', person_qty:'1人あたり加工量(kg)', note:'備考' };
+  const labelMap = { ...PART_LABELS, date:'日付', factory:'工場', staff_count:'人員数（人工合計）', worker_names:'人員名', worker_name:'人員名', workers:'人員（人工）', total_qty:'総加工量(kg)', qty_per_person:'1人工あたり(kg)', qty_per_man_day:'1人工あたり加工量(kg)', man_days_total:'人工合計', honsha_man_days:'本社工場の人工', dai2_man_days:'第二工場の人工', ym:'年月', year:'年', days:'参加日数', avg_daily_qty:'1日平均(kg)', honsha_qty:'本社工場(kg)', dai2_qty:'第二工場(kg)', person_qty:'按分加工量(kg)', note:'備考' };
   const header = keys.map(k => labelMap[k] || k).join(',');
   const body = rows.map(r => keys.map(k => {
     const v = r ? r[k] : '';
@@ -2054,12 +2180,16 @@ function exportCSV(name, rows, keys) {
 function exportListCSV() {
   const records = safeArray(state.records);
   if (records.length === 0) { alert('データがありません'); return; }
-  // worker_names を文字列化したコピーを作成 (CSV用)
-  const rows = records.map(r => ({
-    ...r,
-    worker_names: normalizeWorkerNamesClient(r.worker_names).join('、')
-  }));
-  const keys = ['date','factory','staff_count','worker_names',...PART_KEYS,'total_qty','qty_per_person','note'];
+  // workers を文字列化したコピーを作成 (CSV用): "斉藤（1.0人工）、小澤（1.0人工）、ソックヘン（0.5人工）"
+  const rows = records.map(r => {
+    const wlist = normalizeWorkersClient(r.workers, r.worker_names);
+    return {
+      ...r,
+      workers: wlist.map(w => `${w.name}（${fmtManDays(w.man_days)}人工）`).join('、'),
+      worker_names: wlist.map(w => w.name).join('、')
+    };
+  });
+  const keys = ['date','factory','staff_count','workers',...PART_KEYS,'total_qty','qty_per_person','note'];
   exportCSV('加工実績一覧', rows, keys);
 }
 
@@ -2073,13 +2203,17 @@ function exportListPDF() {
     doc.text('Murata Tekkin - Processing Records', 14, 14);
     doc.setFontSize(9);
     doc.text(`Generated: ${dayjs().format('YYYY-MM-DD HH:mm')}  Unit: ${state.qtyUnit}`, 14, 20);
-    const head = [['Date','Factory','Staff', ...PART_KEYS.map(k => PART_LABELS[k]), 'Total','Per Person']];
-    const body = records.map(r => [
-      r.date, r.factory, safeNum(r.staff_count),
-      ...PART_KEYS.map(k => fmt.qty(r[k]).replace(/\s.*/,'')),
-      fmt.qty(r.total_qty).replace(/\s.*/,''),
-      safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person).replace(/\s.*/,''):'-'
-    ]);
+    const head = [['Date','Factory','ManDays','Workers(ManDays)', ...PART_KEYS.map(k => PART_LABELS[k]), 'Total','Per ManDay']];
+    const body = records.map(r => {
+      const wlist = normalizeWorkersClient(r.workers, r.worker_names);
+      const wStr = wlist.length ? wlist.map(w => `${w.name}(${fmtManDays(w.man_days)})`).join('、') : '-';
+      return [
+        r.date, r.factory, fmtManDays(safeNum(r.staff_count)), wStr,
+        ...PART_KEYS.map(k => fmt.qty(r[k]).replace(/\s.*/,'')),
+        fmt.qty(r.total_qty).replace(/\s.*/,''),
+        safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person).replace(/\s.*/,''):'-'
+      ];
+    });
     doc.autoTable({ head, body, startY: 24, styles: { fontSize: 7, cellPadding: 1 }, headStyles: { fillColor: [37,99,235] } });
     doc.save(`加工実績一覧_${dayjs().format('YYYYMMDD_HHmmss')}.pdf`);
   } catch (e) { alert('PDF出力に失敗しました: ' + e.message); }
