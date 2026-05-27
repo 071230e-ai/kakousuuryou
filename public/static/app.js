@@ -124,13 +124,14 @@ function normalizeWorkerNamesClient(v) {
   return out;
 }
 
-// 人工 (man_days) の値を 0〜1 にクランプ (空欄→1, 数値以外→1, 負→0, 1超→1)
+// 人工 (man_days) の値を 0〜2 にクランプ (空欄→1, 数値以外→1, 負→0, 2超→2)
+// 残業対応のため上限を2.0に拡張 (例: 1.0=通常, 1.25=少し残業, 1.5=長め, 2.0=最大)
 function clampManDaysClient(v) {
   if (v === '' || v == null) return 1;
   const n = Number(v);
   if (!isFinite(n) || isNaN(n)) return 1;
   if (n < 0) return 0;
-  if (n > 1) return 1;
+  if (n > 2) return 2;
   return n;
 }
 
@@ -217,6 +218,161 @@ function sumKey(arr, key) {
   return safeArray(arr).reduce((s, r) => s + safeNum(r && r[key]), 0);
 }
 
+// ========== 部位別1人工あたり 共通ヘルパー (新計算ルール) ==========
+// 新ルール:
+//   部位別人工数 = Σ(その日の総人工 × その日の部位別数量 ÷ その日の総加工数量)   ← 日ごとに計算して合計
+//   部位別1人工あたり = 期間部位別数量合計 ÷ 期間部位別人工数合計
+//   ※ 全部位を同じ総人工で割らない (部位ごとの稼働日重み付け)
+//
+// 入力: rows = 各行が「ある日×ある工場」の集計 ({date, factory, staff_count, total_qty, PART_KEYS...})
+//   (=APIの /analytics/daily 形式、または raw records と同じ粒度)
+function aggregatePartsPerManDay(rows) {
+  rows = safeArray(rows);
+  const sums = {}; // {part_key: {qty, md}}
+  PART_KEYS.forEach(k => { sums[k] = { qty: 0, md: 0 }; });
+  for (const r of rows) {
+    if (!r) continue;
+    const totalQty = safeNum(r.total_qty);
+    const staff = safeNum(r.staff_count);
+    for (const k of PART_KEYS) {
+      const partQty = safeNum(r[k]);
+      // その日のその部位の人工数 = staff_count × (部位qty / total_qty)
+      const partMd = totalQty > 0 ? staff * partQty / totalQty : 0;
+      sums[k].qty += partQty;
+      sums[k].md += partMd;
+    }
+  }
+  return PART_KEYS.map(k => ({
+    part_key: k,
+    part_label: PART_LABELS[k],
+    total_qty: sums[k].qty,
+    part_man_days: sums[k].md,
+    qty_per_man_day: sums[k].md > 0 ? sums[k].qty / sums[k].md : 0
+  }));
+}
+
+// バックエンド /api/analytics/parts-per-manday の overall 配列を表示用形式に整える
+// (新計算ルール: 部位別人工数を返す)
+function normalizePartsPerManDayResponse(arr) {
+  return safeArray(arr).map(r => ({
+    part_key: r.part_key,
+    part_label: PART_LABELS[r.part_key] || r.part_key,
+    total_qty: safeNum(r.total_qty),
+    part_man_days: safeNum(r.part_man_days),
+    qty_per_man_day: safeNum(r.qty_per_man_day)
+  }));
+}
+
+// 部位別1人工あたり加工数量の表 + 任意の棒グラフ用キャンバスHTML を返す
+// 表示列: 部位 / 加工数量 / 部位別人工数 / 1人工あたり加工数量
+// options.canvasId: 指定すると棒グラフ用 <canvas> を併設
+// options.title: 見出し (デフォルト '部位別 1人工あたり加工数量')
+// options.subtitle: 表の上に補足を出したい場合
+function renderPartsPerManDayTable(data, options = {}) {
+  data = safeArray(data);
+  const title = options.title || '部位別 1人工あたり加工数量';
+  const subtitle = options.subtitle || '';
+  const hasAnyQty = data.some(d => safeNum(d.total_qty) > 0);
+  const hasAnyMd = data.some(d => safeNum(d.part_man_days) > 0);
+  return `<div class="bg-white p-4 rounded-xl shadow-sm">
+    <h3 class="font-semibold mb-2"><i class="fas fa-cubes mr-1 text-purple-500"></i>${escapeHtml(title)}</h3>
+    ${subtitle ? `<p class="text-xs text-gray-500 mb-2">${escapeHtml(subtitle)}</p>` : ''}
+    <p class="text-xs text-gray-400 mb-2">計算: 部位別人工数 = Σ(その日の総人工 × 部位数量 ÷ 総加工数量) / 1人工あたり = 部位数量合計 ÷ 部位別人工数合計</p>
+    <div class="overflow-x-auto"><table class="data-table">
+      <thead><tr>
+        <th>部位</th><th>加工数量</th><th>部位別人工数</th><th>1人工あたり加工数量</th>
+      </tr></thead>
+      <tbody>${data.map(d => `<tr>
+        <td class="text part-${String(d.part_key||'').replace('_qty','')}">${escapeHtml(d.part_label)}</td>
+        <td>${fmt.qty(d.total_qty)}</td>
+        <td>${safeNum(d.part_man_days) > 0 ? fmtManDays(d.part_man_days) + '人工' : '-'}</td>
+        <td class="font-bold">${safeNum(d.part_man_days) > 0 ? fmt.qty(d.qty_per_man_day) + '/人工' : '-'}</td>
+      </tr>`).join('')}</tbody>
+    </table></div>
+    ${!hasAnyQty || !hasAnyMd ? '<p class="text-xs text-gray-400 mt-2"><i class="fas fa-info-circle mr-1"></i>対象データがありません</p>' : ''}
+    ${options.canvasId ? `<div class="relative mt-4" style="height:300px"><canvas id="${options.canvasId}"></canvas></div>` : ''}
+  </div>`;
+}
+
+// 部位別1人工あたり棒グラフを描画
+function drawPartsPerManDayChart(canvasId, data) {
+  data = safeArray(data);
+  const hasAny = data.some(d => safeNum(d.qty_per_man_day) > 0 && safeNum(d.part_man_days) > 0);
+  if (!hasAny) { emptyChartMessage(canvasId); return; }
+  safeCreateChart(canvasId, {
+    type: 'bar',
+    data: {
+      labels: data.map(d => d.part_label),
+      datasets: [{
+        label: `1人工あたり (${state.qtyUnit}/人工)`,
+        data: data.map(d => fmt.qtyVal(d.qty_per_man_day)),
+        backgroundColor: data.map(d => PART_COLORS[d.part_key])
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true, title: { display: true, text: state.qtyUnit + ' / 人工' } } }
+    }
+  });
+}
+
+// 部位別1人工あたりCSV出力 (全体)
+// 出力列: 部位 / 加工数量 / 部位別人工数 / 1人工あたり加工数量
+function exportPartsPerManDayCSV(name, data) {
+  data = safeArray(data);
+  if (data.length === 0) { alert('データがありません'); return; }
+  const rows = data.map(d => ({
+    部位: d.part_label,
+    加工数量: safeNum(d.total_qty),
+    部位別人工数: safeNum(d.part_man_days),
+    '1人工あたり加工数量': safeNum(d.part_man_days) > 0 ? safeNum(d.qty_per_man_day) : 0
+  }));
+  exportCSV(name, rows, ['部位','加工数量','部位別人工数','1人工あたり加工数量']);
+}
+
+// 新APIを呼び出して、フィルタを反映した部位別1人工あたり (overall + by_factory) を取得
+// fallback: state.useSampleData の時は SAMPLE_RECORDS から日別集計
+async function fetchPartsPerManDay(params) {
+  if (state.useSampleData) {
+    return computePartsPerManDayFromRecords(SAMPLE_RECORDS, params);
+  }
+  try {
+    const r = await api.partsPerManDay(params || {});
+    return {
+      overall: normalizePartsPerManDayResponse(r?.overall),
+      byFactory: Object.fromEntries(
+        Object.entries(r?.by_factory || {}).map(([fac, arr]) => [fac, normalizePartsPerManDayResponse(arr)])
+      ),
+      rowCount: safeNum(r?.row_count)
+    };
+  } catch (e) {
+    console.warn('[partsPerManDay fetch failed, fallback]', e.message);
+    return computePartsPerManDayFromRecords(SAMPLE_RECORDS, params);
+  }
+}
+
+// SAMPLE_RECORDS から計算 (state.useSampleData=true 時)
+function computePartsPerManDayFromRecords(records, params) {
+  let r = safeArray(records);
+  const p = params || {};
+  if (p.dateFrom) r = r.filter(x => x.date >= p.dateFrom);
+  if (p.dateTo) r = r.filter(x => x.date <= p.dateTo);
+  if (p.year) r = r.filter(x => x.date && x.date.startsWith(String(p.year)));
+  if (p.month) {
+    const m = String(p.month).padStart(2,'0');
+    r = r.filter(x => x.date && x.date.slice(5,7) === m);
+  }
+  if (p.factory && p.factory !== 'all') r = r.filter(x => x.factory === p.factory);
+  const overall = aggregatePartsPerManDay(r);
+  const facs = [...new Set(r.map(x => x.factory))];
+  const byFactory = {};
+  for (const fac of facs) {
+    byFactory[fac] = aggregatePartsPerManDay(r.filter(x => x.factory === fac));
+  }
+  return { overall, byFactory, rowCount: r.length };
+}
+
 // ========== API レイヤー (全てtry/catch) ==========
 const api = {
   async _safeRequest(fn) {
@@ -252,7 +408,9 @@ const api = {
   setTarget(data) { return this._safeRequest(async () => (await axios.post('/api/targets', data)).data); },
   workers() { return this._safeRequest(async () => (await axios.get('/api/workers')).data.workers || []); },
   workerAnalytics(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/workers', { params })).data.data || []); },
-  workerMonthly(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/workers/monthly', { params })).data.data || []); }
+  workerMonthly(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/workers/monthly', { params })).data.data || []); },
+  // 部位別1人工あたり加工数量 (新計算ルール: 部位別人工数 = 各日のstaff × 部位数量/total_qty を積算)
+  partsPerManDay(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/parts-per-manday', { params })).data); }
 };
 
 // ========== ローディング/エラー画面 ==========
@@ -521,6 +679,23 @@ async function renderDashboard() {
   }
   const targetRate = targetThis && targetThis.target_qty > 0 ? (monthTotal / targetThis.target_qty * 100) : null;
 
+  // 部位別1人工あたり (新計算ルール: 日ごと算出を合計): 今月分をAPIから取得
+  let monthPpmd = [];
+  try {
+    const ym = String(data.month.ym || '');
+    const [y, m] = ym.split('-');
+    if (y && m) {
+      const ppmd = await fetchPartsPerManDay({ year: y, month: m });
+      monthPpmd = ppmd.overall || [];
+    } else {
+      const ppmd = await fetchPartsPerManDay({});
+      monthPpmd = ppmd.overall || [];
+    }
+  } catch (e) {
+    console.warn('[dashboard partsPerManDay]', e.message);
+    monthPpmd = [];
+  }
+
   const main = document.getElementById('main');
   main.innerHTML = `
     <div class="space-y-6">
@@ -583,9 +758,22 @@ async function renderDashboard() {
           <div class="relative" style="height:300px"><canvas id="factoryChart"></canvas></div>
         </div>
       </div>
+
+      <div id="dashPartsPerMd">${
+        renderPartsPerManDayTable(
+          monthPpmd,
+          {
+            title: `部位別 1人工あたり加工数量（今月 ${dayjs(data.month.ym+'-01').format('YYYY年M月')}）`,
+            canvasId: 'dashPartsPerMdChart'
+          }
+        )
+      }</div>
     </div>
   `;
   bindUnitToggle();
+
+  // 部位別1人工あたり棒グラフ
+  drawPartsPerManDayChart('dashPartsPerMdChart', monthPpmd);
 
   // 部位別グラフ
   const partsTotal = PART_KEYS.reduce((s,k)=>s+safeNum(monthParts[k]),0);
@@ -747,7 +935,7 @@ function renderInput(record = null) {
               <i class="fas fa-plus mr-1"></i>人員を追加
             </button>
           </div>
-          <p class="text-xs text-gray-600 mb-2">人員名と人工（1日=1.0、半日=0.5、四半日=0.25）を入力してください。人工合計が「人員数」に自動セットされます。空欄なら「人員数」欄を手入力できます。</p>
+          <p class="text-xs text-gray-600 mb-2">人員名と人工（1日=1.0、半日=0.5、四半日=0.25、残業=1.25〜2.0）を入力してください。人工合計が「人員数」に自動セットされます。空欄なら「人員数」欄を手入力できます。</p>
           <div id="workerList" class="space-y-2"></div>
         </div>
 
@@ -818,7 +1006,7 @@ function renderInput(record = null) {
           </div>
           <div class="w-full sm:w-28">
             <label class="text-xs text-gray-500 sm:hidden">人工</label>
-            <input type="number" data-worker-md-idx="${i}" value="${fmtManDays(w.man_days)}" min="0" max="1" step="0.25" placeholder="1.0" class="input-num w-full" inputmode="decimal" title="人工 (1日=1.0、半日=0.5、四半日=0.25)" />
+            <input type="number" data-worker-md-idx="${i}" value="${fmtManDays(w.man_days)}" min="0" max="2" step="0.25" placeholder="1.0" class="input-num w-full" inputmode="decimal" title="人工 (1日=1.0、半日=0.5、残業=1.25/1.5/1.75、最大=2.0)" />
           </div>
           <button type="button" data-worker-del="${i}" class="btn-danger text-sm whitespace-nowrap sm:w-auto" title="削除">
             <i class="fas fa-trash"></i><span class="hidden sm:inline ml-1">削除</span>
@@ -1185,13 +1373,16 @@ async function renderDaily() {
         <div class="relative" style="height:360px"><canvas id="dailyChart"></canvas></div>
       </div>
       <div id="dailyTable" class="bg-white rounded-xl shadow-sm overflow-x-auto"></div>
+      <div id="dailyPartsPerMd"></div>
     </div>
   `;
   bindUnitToggle();
 
   const load = async () => {
     const tableEl = document.getElementById('dailyTable');
+    const partsPerMdEl = document.getElementById('dailyPartsPerMd');
     setSectionLoading(tableEl);
+    if (partsPerMdEl) partsPerMdEl.innerHTML = '';
     const dateFrom = document.getElementById('dFrom').value;
     const dateTo = document.getElementById('dTo').value;
     const factory = document.getElementById('dFactory').value;
@@ -1213,6 +1404,14 @@ async function renderDaily() {
     if (dates.length === 0) {
       tableEl.innerHTML = `<div class="text-center py-10 text-gray-500"><i class="fas fa-inbox text-3xl"></i><p class="mt-2">表示できるデータがありません</p></div>`;
       emptyChartMessage('dailyChart');
+      if (partsPerMdEl) {
+        const empty = aggregatePartsPerManDay([]);
+        partsPerMdEl.innerHTML = renderPartsPerManDayTable(empty, {
+          title: '部位別 1人工あたり加工数量',
+          canvasId: 'dailyPartsPerMdChart'
+        });
+        drawPartsPerManDayChart('dailyPartsPerMdChart', empty);
+      }
       return;
     }
     const honshaData = dates.map(d => fmt.qtyVal(data.find(x=>x.date===d && x.factory==='本社工場')?.total_qty||0));
@@ -1246,8 +1445,23 @@ async function renderDaily() {
       </table>
     `;
 
-    document.getElementById('dCsv').onclick = () => exportCSV('日別分析', data, ['date','factory','staff_count',...PART_KEYS,'total_qty','qty_per_person']);
-    document.getElementById('dPdf').onclick = () => exportPDF('日別分析レポート', data, 'daily');
+    // 部位別1人工あたり加工数量
+    const partsData = aggregatePartsPerManDay(data);
+    if (partsPerMdEl) {
+      const subt = `期間: ${dateFrom||'-'} 〜 ${dateTo||'-'} / 工場: ${factory==='all'?'全体合算':factory}`;
+      partsPerMdEl.innerHTML = renderPartsPerManDayTable(partsData, {
+        title: '部位別 1人工あたり加工数量',
+        subtitle: subt,
+        canvasId: 'dailyPartsPerMdChart'
+      });
+      drawPartsPerManDayChart('dailyPartsPerMdChart', partsData);
+    }
+
+    document.getElementById('dCsv').onclick = () => {
+      exportCSV('日別分析', data, ['date','factory','staff_count',...PART_KEYS,'total_qty','qty_per_person']);
+      exportPartsPerManDayCSV('日別分析_部位別1人工あたり', partsData);
+    };
+    document.getElementById('dPdf').onclick = () => exportPDF('日別分析レポート', data, 'daily', { partsPerMd: partsData });
   };
   document.getElementById('dApply').addEventListener('click', load);
   await load();
@@ -1302,13 +1516,16 @@ async function renderMonthly() {
         <div class="relative" style="height:360px"><canvas id="monthlyChart"></canvas></div>
       </div>
       <div id="monthlyTable" class="bg-white rounded-xl shadow-sm overflow-x-auto"></div>
+      <div id="monthlyPartsPerMd"></div>
     </div>
   `;
   bindUnitToggle();
 
   const load = async () => {
     const tableEl = document.getElementById('monthlyTable');
+    const partsPerMdEl = document.getElementById('monthlyPartsPerMd');
     setSectionLoading(tableEl);
+    if (partsPerMdEl) partsPerMdEl.innerHTML = '';
     const year = document.getElementById('mYear').value;
     const factory = document.getElementById('mFactory').value;
     let data = [];
@@ -1329,6 +1546,14 @@ async function renderMonthly() {
     if (months.length === 0) {
       tableEl.innerHTML = `<div class="text-center py-10 text-gray-500"><i class="fas fa-inbox text-3xl"></i><p class="mt-2">表示できるデータがありません</p></div>`;
       emptyChartMessage('monthlyChart');
+      if (partsPerMdEl) {
+        const empty = aggregatePartsPerManDay([]);
+        partsPerMdEl.innerHTML = renderPartsPerManDayTable(empty, {
+          title: '部位別 1人工あたり加工数量',
+          canvasId: 'monthlyPartsPerMdChart'
+        });
+        drawPartsPerManDayChart('monthlyPartsPerMdChart', empty);
+      }
       return;
     }
     const honshaData = months.map(m => fmt.qtyVal(data.find(x=>x.ym===m && x.factory==='本社工場')?.total_qty||0));
@@ -1363,8 +1588,27 @@ async function renderMonthly() {
         </tbody>
       </table>
     `;
-    document.getElementById('mCsv').onclick = () => exportCSV('月別分析', data, ['ym','factory','days','staff_count',...PART_KEYS,'total_qty','avg_daily_qty','qty_per_person']);
-    document.getElementById('mPdf').onclick = () => exportPDF('月別分析レポート', data, 'monthly');
+    // 部位別1人工あたり加工数量 (新計算ルール: 日ごとに算出して合計 → APIに委譲)
+    let partsData = [];
+    try {
+      const ppmd = await fetchPartsPerManDay({ year, factory });
+      partsData = ppmd.overall || [];
+    } catch (e) { console.warn('[monthly partsPerManDay]', e.message); }
+    if (partsPerMdEl) {
+      const subt = `年: ${year} / 工場: ${factory==='all'?'全体合算':factory}`;
+      partsPerMdEl.innerHTML = renderPartsPerManDayTable(partsData, {
+        title: '部位別 1人工あたり加工数量',
+        subtitle: subt,
+        canvasId: 'monthlyPartsPerMdChart'
+      });
+      drawPartsPerManDayChart('monthlyPartsPerMdChart', partsData);
+    }
+
+    document.getElementById('mCsv').onclick = () => {
+      exportCSV('月別分析', data, ['ym','factory','days','staff_count',...PART_KEYS,'total_qty','avg_daily_qty','qty_per_person']);
+      exportPartsPerManDayCSV('月別分析_部位別1人工あたり', partsData);
+    };
+    document.getElementById('mPdf').onclick = () => exportPDF('月別分析レポート', data, 'monthly', { partsPerMd: partsData });
   };
   document.getElementById('mApply').addEventListener('click', load);
   await load();
@@ -1434,13 +1678,16 @@ async function renderYearly() {
         <div class="relative" style="height:320px"><canvas id="yearPartsChart"></canvas></div>
       </div>
       <div id="yearlyTable" class="bg-white rounded-xl shadow-sm overflow-x-auto"></div>
+      <div id="yearlyPartsPerMd"></div>
     </div>
   `;
   bindUnitToggle();
 
   const load = async () => {
     const tableEl = document.getElementById('yearlyTable');
+    const partsPerMdEl = document.getElementById('yearlyPartsPerMd');
     setSectionLoading(tableEl);
+    if (partsPerMdEl) partsPerMdEl.innerHTML = '';
     const factory = document.getElementById('yFactory').value;
     const trendYear = document.getElementById('yTrendYear').value;
     let data = [], monthly = [];
@@ -1465,6 +1712,14 @@ async function renderYearly() {
     if (data.length === 0) {
       tableEl.innerHTML = `<div class="text-center py-10 text-gray-500"><i class="fas fa-inbox text-3xl"></i><p class="mt-2">表示できるデータがありません</p></div>`;
       ['yearlyChart','trendChart','yearPartsChart'].forEach(emptyChartMessage);
+      if (partsPerMdEl) {
+        const empty = aggregatePartsPerManDay([]);
+        partsPerMdEl.innerHTML = renderPartsPerManDayTable(empty, {
+          title: '部位別 1人工あたり加工数量',
+          canvasId: 'yearlyPartsPerMdChart'
+        });
+        drawPartsPerManDayChart('yearlyPartsPerMdChart', empty);
+      }
       return;
     }
 
@@ -1528,8 +1783,27 @@ async function renderYearly() {
         </tbody>
       </table>
     `;
-    document.getElementById('yCsv').onclick = () => exportCSV('年間分析', data, ['year','factory','days','staff_count',...PART_KEYS,'total_qty','qty_per_person']);
-    document.getElementById('yPdf').onclick = () => exportPDF('年間分析レポート', data, 'yearly');
+    // 部位別1人工あたり加工数量 (年間=全データ / 日ごとに算出して合計 → APIに委譲)
+    let partsData = [];
+    try {
+      const ppmd = await fetchPartsPerManDay({ factory });
+      partsData = ppmd.overall || [];
+    } catch (e) { console.warn('[yearly partsPerManDay]', e.message); }
+    if (partsPerMdEl) {
+      const subt = `工場: ${factory==='all'?'全体合算':factory}`;
+      partsPerMdEl.innerHTML = renderPartsPerManDayTable(partsData, {
+        title: '部位別 1人工あたり加工数量（年間累計）',
+        subtitle: subt,
+        canvasId: 'yearlyPartsPerMdChart'
+      });
+      drawPartsPerManDayChart('yearlyPartsPerMdChart', partsData);
+    }
+
+    document.getElementById('yCsv').onclick = () => {
+      exportCSV('年間分析', data, ['year','factory','days','staff_count',...PART_KEYS,'total_qty','qty_per_person']);
+      exportPartsPerManDayCSV('年間分析_部位別1人工あたり', partsData);
+    };
+    document.getElementById('yPdf').onclick = () => exportPDF('年間分析レポート', data, 'yearly', { partsPerMd: partsData });
   };
   document.getElementById('yApply').addEventListener('click', load);
   await load();
@@ -1579,12 +1853,15 @@ async function renderCompare() {
         <div class="bg-white p-4 rounded-xl shadow-sm"><h3 class="font-semibold mb-2">部位別比較</h3><div class="relative" style="height:340px"><canvas id="cmpParts"></canvas></div></div>
       </div>
       <div id="cmpTable" class="bg-white rounded-xl shadow-sm overflow-x-auto"></div>
+      <div id="cmpPartsPerMd" class="space-y-4"></div>
     </div>
   `;
   bindUnitToggle();
   const load = async () => {
     const tableEl = document.getElementById('cmpTable');
+    const partsPerMdEl = document.getElementById('cmpPartsPerMd');
     setSectionLoading(tableEl);
+    if (partsPerMdEl) partsPerMdEl.innerHTML = '';
     const year = document.getElementById('cYear').value;
     let data = [];
     try {
@@ -1658,6 +1935,42 @@ async function renderCompare() {
       </table>
     `;
 
+    // 部位別1人工あたり加工数量 (工場ごと + 全体) — 日ごとに算出して合計 → APIに委譲
+    let partsAll = [], partsHonsha = [], partsDai2 = [];
+    try {
+      const ppmd = await fetchPartsPerManDay({ year });
+      partsAll = ppmd.overall || [];
+      partsHonsha = (ppmd.byFactory && ppmd.byFactory['本社工場']) || [];
+      partsDai2 = (ppmd.byFactory && ppmd.byFactory['第二工場']) || [];
+      // 部位カバレッジ補完 (該当工場データなしでも空配列を整形)
+      if (partsHonsha.length === 0) partsHonsha = aggregatePartsPerManDay([]);
+      if (partsDai2.length === 0) partsDai2 = aggregatePartsPerManDay([]);
+    } catch (e) { console.warn('[compare partsPerManDay]', e.message); }
+    if (partsPerMdEl) {
+      partsPerMdEl.innerHTML = `
+        ${renderPartsPerManDayTable(partsAll, {
+          title: '部位別 1人工あたり加工数量（全体合算）',
+          subtitle: `年: ${year}`,
+          canvasId: 'cmpPartsPerMdChartAll'
+        })}
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          ${renderPartsPerManDayTable(partsHonsha, {
+            title: '部位別 1人工あたり加工数量（本社工場）',
+            subtitle: `年: ${year}`,
+            canvasId: 'cmpPartsPerMdChartHonsha'
+          })}
+          ${renderPartsPerManDayTable(partsDai2, {
+            title: '部位別 1人工あたり加工数量（第二工場）',
+            subtitle: `年: ${year}`,
+            canvasId: 'cmpPartsPerMdChartDai2'
+          })}
+        </div>
+      `;
+      drawPartsPerManDayChart('cmpPartsPerMdChartAll', partsAll);
+      drawPartsPerManDayChart('cmpPartsPerMdChartHonsha', partsHonsha);
+      drawPartsPerManDayChart('cmpPartsPerMdChartDai2', partsDai2);
+    }
+
     document.getElementById('cCsv').onclick = () => {
       const rows = months.map(m => {
         const h = safeNum(honsha.find(x=>x.ym===m)?.total_qty);
@@ -1665,8 +1978,13 @@ async function renderCompare() {
         return { 月: m, 本社工場: h, 第二工場: d, 合計: h+d };
       });
       exportCSV('工場別比較', rows, ['月','本社工場','第二工場','合計']);
+      exportPartsPerManDayCSV('工場別比較_部位別1人工あたり_全体', partsAll);
+      exportPartsPerManDayCSV('工場別比較_部位別1人工あたり_本社工場', partsHonsha);
+      exportPartsPerManDayCSV('工場別比較_部位別1人工あたり_第二工場', partsDai2);
     };
-    document.getElementById('cPdf').onclick = () => exportPDF('工場別比較レポート', data, 'compare');
+    document.getElementById('cPdf').onclick = () => exportPDF('工場別比較レポート', data, 'compare', {
+      partsPerMd: partsAll, partsPerMdHonsha: partsHonsha, partsPerMdDai2: partsDai2
+    });
   };
   document.getElementById('cApply').addEventListener('click', load);
   await load();
@@ -1764,7 +2082,9 @@ function aggregateWorkersLocal(records, { year, month, dateFrom, dateTo, factory
           worker_name: name, days: 0, total_qty: 0,
           man_days_total: 0, honsha_man_days: 0, dai2_man_days: 0,
           honsha_qty: 0, dai2_qty: 0,
-          ...Object.fromEntries(PART_KEYS.map(k => [k, 0]))
+          ...Object.fromEntries(PART_KEYS.map(k => [k, 0])),
+          // 新計算ルール: 部位別人工数 (per-worker)
+          ...Object.fromEntries(PART_KEYS.map(k => ['partmd_' + k, 0]))
         };
       }
       const a = map[name];
@@ -1773,7 +2093,12 @@ function aggregateWorkersLocal(records, { year, month, dateFrom, dateTo, factory
       a.total_qty += personQty;
       if (r.factory === '本社工場') { a.honsha_qty += personQty; a.honsha_man_days += md; }
       else if (r.factory === '第二工場') { a.dai2_qty += personQty; a.dai2_man_days += md; }
-      PART_KEYS.forEach(k => { a[k] += (safeNum(r[k]) / mdSum) * md; });
+      PART_KEYS.forEach(k => {
+        const partQty = safeNum(r[k]);
+        a[k] += (partQty / mdSum) * md;
+        // 新計算ルール: その人の部位別人工数 = その人の人工 × 部位数量 ÷ 総加工数量 を日ごとに積算
+        if (total > 0) a['partmd_' + k] += md * (partQty / total);
+      });
     }
   }
   let data = Object.values(map).map(a => ({
@@ -1822,6 +2147,7 @@ function aggregateWorkersMonthlyLocal(records, { year, factory, workerName }) {
 
 let _workerDataCache = [];
 let _workerMonthlyCache = [];
+let _workerPartsPerMdCache = []; // 人員ごとの部位別1人工あたり (CSV/PDF用)
 
 async function renderWorkers() {
   const main = document.getElementById('main');
@@ -1895,6 +2221,36 @@ async function renderWorkers() {
       </div>
 
       <div id="wTable" class="bg-white rounded-xl shadow-sm overflow-x-auto"></div>
+
+      <!-- 人員ごとの部位別 1人工あたり加工数量 -->
+      <div id="wPartsPerMdTable" class="bg-white rounded-xl shadow-sm overflow-x-auto"></div>
+
+      <!-- 部位別 1人工あたり ランキング (基礎/梁/柱) -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div class="bg-white p-4 rounded-xl shadow-sm">
+          <h3 class="font-semibold mb-3"><i class="fas fa-trophy mr-1" style="color:${PART_COLORS.foundation_qty}"></i>基礎 1人工あたり ランキング</h3>
+          <div class="relative" style="height:320px"><canvas id="wRankFoundationChart"></canvas></div>
+        </div>
+        <div class="bg-white p-4 rounded-xl shadow-sm">
+          <h3 class="font-semibold mb-3"><i class="fas fa-trophy mr-1" style="color:${PART_COLORS.beam_qty}"></i>梁 1人工あたり ランキング</h3>
+          <div class="relative" style="height:320px"><canvas id="wRankBeamChart"></canvas></div>
+        </div>
+        <div class="bg-white p-4 rounded-xl shadow-sm">
+          <h3 class="font-semibold mb-3"><i class="fas fa-trophy mr-1" style="color:${PART_COLORS.column_qty}"></i>柱 1人工あたり ランキング</h3>
+          <div class="relative" style="height:320px"><canvas id="wRankColumnChart"></canvas></div>
+        </div>
+      </div>
+
+      <!-- 部位プルダウン選択型 1人工あたり比較グラフ -->
+      <div class="bg-white p-4 rounded-xl shadow-sm">
+        <div class="flex flex-wrap items-center gap-3 mb-3">
+          <h3 class="font-semibold"><i class="fas fa-filter text-indigo-500 mr-1"></i>部位を選んで 人員別 1人工あたり 比較</h3>
+          <select id="wPartSelector" class="input-base" style="max-width:180px">
+            ${PART_KEYS.map(k=>`<option value="${k}" ${state.workerPartFilter===k?'selected':''}>${PART_LABELS[k]}</option>`).join('')}
+          </select>
+        </div>
+        <div class="relative" style="height:340px"><canvas id="wPartSelectChart"></canvas></div>
+      </div>
     </div>
   `;
   bindUnitToggle();
@@ -2086,6 +2442,176 @@ async function loadWorkerData() {
       options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'top' } } }
     });
   } else { emptyChartMessage('wMonthChart'); }
+
+  // ========== 人員ごとの部位別 1人工あたり加工数量 ==========
+  renderWorkerPartsPerMd(data);
+}
+
+// 人員ごとの部位別 1人工あたり加工数量 を描画 (新計算ルール)
+// data: 人員別分析API の戻り値 (各worker: {worker_name, man_days_total, foundation_qty, ..., other_qty, partmd_foundation_qty, ..., partmd_other_qty})
+//   注: foundation_qty 等は按分済み加工数量 (バックエンドSQL: (r[part]/r.staff_count)*worker.man_days の合計)
+//       partmd_foundation_qty 等は新計算ルールの「部位別人工数」 (バックエンドSQL: COALESCE(worker.man_days, 1.0) * r[part]/r.total_qty の合計)
+// 部位別 1人工あたり = worker[part_key] / worker['partmd_' + part_key]
+//   表は long-format (人員×部位の行): 人員名/部位/加工数量/部位別人工数/1人工あたり加工数量
+function renderWorkerPartsPerMd(data) {
+  data = safeArray(data);
+  const tableEl = document.getElementById('wPartsPerMdTable');
+  if (!tableEl) return;
+
+  if (data.length === 0) {
+    tableEl.innerHTML = `
+      <div class="p-4">
+        <h3 class="font-semibold mb-2"><i class="fas fa-cubes mr-1 text-purple-500"></i>人員名ごとの部位別 1人工あたり加工数量</h3>
+        <div class="text-center py-6 text-gray-500 text-sm"><i class="fas fa-inbox text-2xl"></i><p class="mt-1">表示できるデータがありません</p></div>
+      </div>`;
+    ['wRankFoundationChart','wRankBeamChart','wRankColumnChart','wPartSelectChart'].forEach(emptyChartMessage);
+    bindWorkerPartSelector([]);
+    return;
+  }
+
+  // 各worker × 各part の (part_qty, part_man_days, qty_per_man_day) を組み立て
+  // rows[]: { worker_name, man_days_total, part_key, part_label, part_qty, part_man_days, qty_per_man_day }
+  const rows = [];
+  // 部位別ランキング/プルダウングラフ用の wide-format も並行作成
+  const wideRows = data.map(d => {
+    const wide = { worker_name: d.worker_name, man_days_total: safeNum(d.man_days_total) };
+    PART_KEYS.forEach(k => {
+      const partQty = safeNum(d[k]);
+      const partMd = safeNum(d['partmd_' + k]);
+      const qtyPerMd = partMd > 0 ? partQty / partMd : 0;
+      wide[k] = qtyPerMd;             // 1人工あたり (ランキング/グラフ用)
+      wide['_qty_' + k] = partQty;    // 部位別加工数量 (CSV/PDF用)
+      wide['_md_' + k] = partMd;      // 部位別人工数 (CSV/PDF用)
+      rows.push({
+        worker_name: d.worker_name,
+        man_days_total: safeNum(d.man_days_total),
+        part_key: k,
+        part_label: PART_LABELS[k],
+        part_qty: partQty,
+        part_man_days: partMd,
+        qty_per_man_day: qtyPerMd
+      });
+    });
+    return wide;
+  });
+
+  // テーブル (long-format: 人員名 / 部位 / 加工数量 / 部位別人工数 / 1人工あたり加工数量)
+  // 表示しやすさのため加工数量0の部位は省略 (全部位0なら -) ; ただし人員名は最初の部位行で1度だけ表示
+  const grouped = {};
+  rows.forEach(r => {
+    if (!grouped[r.worker_name]) grouped[r.worker_name] = [];
+    grouped[r.worker_name].push(r);
+  });
+
+  const tbodyHtml = Object.entries(grouped).map(([name, list]) => {
+    const visible = list.filter(r => r.part_qty > 0 || r.part_man_days > 0);
+    const useRows = visible.length > 0 ? visible : [list[0]]; // 全部0なら最初の1行だけプレースホルダー表示
+    return useRows.map((r, i) => `<tr>
+      ${i === 0 ? `<td class="text font-semibold" rowspan="${useRows.length}">${escapeHtml(name)}</td>` : ''}
+      <td class="text part-${String(r.part_key||'').replace('_qty','')}">${escapeHtml(r.part_label)}</td>
+      <td>${r.part_qty > 0 ? fmt.qty(r.part_qty) : '-'}</td>
+      <td>${r.part_man_days > 0 ? fmtManDays(r.part_man_days) + '人工' : '-'}</td>
+      <td class="font-bold">${r.part_man_days > 0 ? fmt.qty(r.qty_per_man_day) + '/人工' : '-'}</td>
+    </tr>`).join('');
+  }).join('');
+
+  tableEl.innerHTML = `
+    <div class="p-4">
+      <h3 class="font-semibold mb-2"><i class="fas fa-cubes mr-1 text-purple-500"></i>人員名ごとの部位別 1人工あたり加工数量</h3>
+      <p class="text-xs text-gray-500 mb-1">計算式 (新): その人の部位別人工数 = Σ(その日のその人の人工 × 部位数量 ÷ 総加工数量) / 1人工あたり = 部位別加工数量合計 ÷ 部位別人工数合計</p>
+      <div class="overflow-x-auto">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>人員名</th><th>部位</th><th>加工数量</th><th>部位別人工数</th><th>1人工あたり加工数量</th>
+          </tr>
+        </thead>
+        <tbody>${tbodyHtml}</tbody>
+      </table>
+      </div>
+    </div>
+  `;
+
+  // 基礎/梁/柱 ランキング (Top 10) — wide-format の qty/人工値を使用
+  const drawRanking = (canvasId, partKey, color) => {
+    const sorted = [...wideRows]
+      .filter(r => r['_md_' + partKey] > 0 && r[partKey] > 0)
+      .sort((a,b) => safeNum(b[partKey]) - safeNum(a[partKey]))
+      .slice(0, 10);
+    if (sorted.length === 0) { emptyChartMessage(canvasId); return; }
+    safeCreateChart(canvasId, {
+      type: 'bar',
+      data: {
+        labels: sorted.map(r => r.worker_name),
+        datasets: [{
+          label: `${PART_LABELS[partKey]} 1人工あたり (${state.qtyUnit}/人工)`,
+          data: sorted.map(r => fmt.qtyVal(r[partKey])),
+          backgroundColor: color
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: { x: { beginAtZero: true, title: { display: true, text: state.qtyUnit + ' / 人工' } } }
+      }
+    });
+  };
+  drawRanking('wRankFoundationChart', 'foundation_qty', PART_COLORS.foundation_qty);
+  drawRanking('wRankBeamChart', 'beam_qty', PART_COLORS.beam_qty);
+  drawRanking('wRankColumnChart', 'column_qty', PART_COLORS.column_qty);
+
+  // 部位プルダウン用キャッシュ (wide-format)
+  _workerPartsPerMdCache = wideRows;
+
+  // 部位プルダウン選択型グラフ
+  bindWorkerPartSelector(wideRows);
+}
+
+// 後で再描画できるように分離
+// rows は wide-format: { worker_name, man_days_total, [partKey]: qty/人工値, _md_<partKey>: 部位別人工数 ... }
+function drawWorkerPartSelectChart(rows, partKey) {
+  rows = safeArray(rows);
+  if (rows.length === 0 || !PART_KEYS.includes(partKey)) {
+    emptyChartMessage('wPartSelectChart');
+    return;
+  }
+  const sorted = [...rows]
+    .filter(r => safeNum(r['_md_' + partKey]) > 0)
+    .sort((a,b) => safeNum(b[partKey]) - safeNum(a[partKey]))
+    .slice(0, 15);
+  if (sorted.length === 0 || sorted.every(r => safeNum(r[partKey]) <= 0)) {
+    emptyChartMessage('wPartSelectChart');
+    return;
+  }
+  safeCreateChart('wPartSelectChart', {
+    type: 'bar',
+    data: {
+      labels: sorted.map(r => r.worker_name),
+      datasets: [{
+        label: `${PART_LABELS[partKey]} 1人工あたり (${state.qtyUnit}/人工)`,
+        data: sorted.map(r => fmt.qtyVal(r[partKey])),
+        backgroundColor: PART_COLORS[partKey] || '#6b7280'
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, indexAxis: 'y',
+      plugins: { legend: { display: false } },
+      scales: { x: { beginAtZero: true, title: { display: true, text: state.qtyUnit + ' / 人工' } } }
+    }
+  });
+}
+
+function bindWorkerPartSelector(rows) {
+  const sel = document.getElementById('wPartSelector');
+  if (!sel) return;
+  const initialKey = PART_KEYS.includes(state.workerPartFilter) ? state.workerPartFilter : 'foundation_qty';
+  sel.value = initialKey;
+  drawWorkerPartSelectChart(rows, initialKey);
+  // 既存リスナーがあれば onchange を上書き
+  sel.onchange = () => {
+    state.workerPartFilter = sel.value;
+    drawWorkerPartSelectChart(rows, sel.value);
+  };
 }
 
 function exportWorkerCSV() {
@@ -2101,6 +2627,32 @@ function exportWorkerCSV() {
   }));
   const keys = ['worker_name','days','man_days_total','total_qty','qty_per_man_day','avg_daily_qty','honsha_qty','dai2_qty','honsha_man_days','dai2_man_days', ...PART_KEYS];
   exportCSV('人員別分析', rows, keys);
+
+  // 人員ごとの部位別 1人工あたり加工数量 CSV (long-format, 新計算ルール)
+  // 列: 人員名 / 部位 / 加工数量 / 部位別人工数 / 1人工あたり加工数量
+  const partsRows = [];
+  data.forEach(d => {
+    PART_KEYS.forEach(k => {
+      const partQty = safeNum(d[k]);
+      const partMd = safeNum(d['partmd_' + k]);
+      const qtyPerMd = partMd > 0 ? partQty / partMd : 0;
+      // 数量も人工も0の行はスキップ
+      if (partQty <= 0 && partMd <= 0) return;
+      partsRows.push({
+        人員名: d.worker_name,
+        部位: PART_LABELS[k],
+        加工数量: partQty,
+        部位別人工数: partMd,
+        '1人工あたり加工数量': partMd > 0 ? qtyPerMd : 0
+      });
+    });
+  });
+  if (partsRows.length === 0) {
+    // 全人員で全部位0の場合でも、最低限ヘッダだけは出す
+    partsRows.push({ 人員名: '-', 部位: '-', 加工数量: 0, 部位別人工数: 0, '1人工あたり加工数量': 0 });
+  }
+  const partsKeys = ['人員名','部位','加工数量','部位別人工数','1人工あたり加工数量'];
+  exportCSV('人員別_部位別1人工あたり', partsRows, partsKeys);
 }
 
 function exportWorkerPDF() {
@@ -2140,7 +2692,7 @@ function exportWorkerPDF() {
 
     const finalY1 = (doc.lastAutoTable && doc.lastAutoTable.finalY ? doc.lastAutoTable.finalY : 60) + 6;
     doc.setFontSize(11);
-    doc.text('Parts Breakdown by Worker', 14, finalY1);
+    doc.text('Parts Breakdown by Worker (Allocated Qty)', 14, finalY1);
     doc.autoTable({
       head: [['Worker', ...PART_KEYS.map(k => PART_LABELS[k])]],
       body: data.map(d => [
@@ -2148,6 +2700,40 @@ function exportWorkerPDF() {
         ...PART_KEYS.map(k => fmt.qty(d[k]).replace(/\s.*/,''))
       ]),
       startY: finalY1 + 2, styles: { fontSize: 7, cellPadding: 1 }, headStyles: { fillColor: [37,99,235] }
+    });
+
+    // 新規ページ: 人員ごとの部位別 1人工あたり加工数量 (新計算ルール: long-format)
+    // 列: Worker / Part / Qty / Part ManDays / Per ManDay
+    doc.addPage('a4', 'landscape');
+    doc.setFontSize(14);
+    doc.text('Parts Quantity per Man-Day by Worker (Per-Part Man-Days Method)', 14, 14);
+    doc.setFontSize(9);
+    doc.text(`Generated: ${dayjs().format('YYYY-MM-DD HH:mm')}  Unit: ${state.qtyUnit}  ${filter.join('  ')}`, 14, 20);
+    doc.text('Formula: part_man_days = sum_over_days(worker_man_days * part_qty / total_qty); per_md = part_qty / part_man_days', 14, 25);
+
+    const partsBody = [];
+    data.forEach(d => {
+      PART_KEYS.forEach(k => {
+        const partQty = safeNum(d[k]);
+        const partMd = safeNum(d['partmd_' + k]);
+        if (partQty <= 0 && partMd <= 0) return;
+        const qtyPerMd = partMd > 0 ? partQty / partMd : 0;
+        partsBody.push([
+          d.worker_name,
+          PART_LABELS[k],
+          partQty > 0 ? fmt.qty(partQty).replace(/\s.*/,'') : '-',
+          partMd > 0 ? fmtManDays(partMd) : '-',
+          partMd > 0 ? fmt.qty(qtyPerMd).replace(/\s.*/,'') : '-'
+        ]);
+      });
+    });
+    if (partsBody.length === 0) {
+      partsBody.push(['-','-','-','-','-']);
+    }
+    doc.autoTable({
+      head: [['Worker','Part','Qty','Part ManDays','Per ManDay']],
+      body: partsBody,
+      startY: 30, styles: { fontSize: 8, cellPadding: 1 }, headStyles: { fillColor: [124,58,237] }
     });
 
     doc.save(`人員別分析_${dayjs().format('YYYYMMDD_HHmmss')}.pdf`);
@@ -2219,7 +2805,7 @@ function exportListPDF() {
   } catch (e) { alert('PDF出力に失敗しました: ' + e.message); }
 }
 
-function exportPDF(title, data, kind) {
+function exportPDF(title, data, kind, extras = {}) {
   data = safeArray(data);
   if (data.length === 0) { alert('データがありません'); return; }
   try {
@@ -2244,6 +2830,36 @@ function exportPDF(title, data, kind) {
       body = data.map(r => [r.ym || r.year, r.factory, fmt.qty(r.total_qty).replace(/\s.*/,'')]);
     }
     doc.autoTable({ head, body, startY: 24, styles: { fontSize: 7, cellPadding: 1 }, headStyles: { fillColor: [37,99,235] } });
+
+    // 部位別 1人工あたり加工数量 を追加 (新計算ルール: 部位別人工数 を表示)
+    // 列: Part / Total Qty / Part Man-Days / Per Man-Day
+    const addPartsPerMdPage = (partsData, subtitle) => {
+      if (!Array.isArray(partsData) || partsData.length === 0) return;
+      doc.addPage('a4', 'landscape');
+      doc.setFontSize(14);
+      doc.text('Parts Quantity per Man-Day (Per-Part Man-Days Method)', 14, 14);
+      doc.setFontSize(9);
+      doc.text(`Generated: ${dayjs().format('YYYY-MM-DD HH:mm')}  Unit: ${state.qtyUnit}`, 14, 20);
+      doc.text('Formula: part_man_days = sum_over_days(total_staff * part_qty / total_qty); per_md = part_qty / part_man_days', 14, 25);
+      if (subtitle) doc.text(subtitle, 14, 30);
+      doc.autoTable({
+        head: [['Part','Total Qty','Part Man-Days','Per Man-Day']],
+        body: partsData.map(d => [
+          d.part_label,
+          d.total_qty > 0 ? fmt.qty(d.total_qty).replace(/\s.*/,'') : '-',
+          safeNum(d.part_man_days) > 0 ? fmtManDays(d.part_man_days) : '-',
+          safeNum(d.part_man_days) > 0 ? fmt.qty(d.qty_per_man_day).replace(/\s.*/,'') + '/MD' : '-'
+        ]),
+        startY: subtitle ? 35 : 30, styles: { fontSize: 9, cellPadding: 2 }, headStyles: { fillColor: [124,58,237] }
+      });
+    };
+
+    if (extras && extras.partsPerMd) {
+      addPartsPerMdPage(extras.partsPerMd, kind === 'compare' ? 'All Factories' : '');
+    }
+    if (extras && extras.partsPerMdHonsha) addPartsPerMdPage(extras.partsPerMdHonsha, 'Honsha Factory');
+    if (extras && extras.partsPerMdDai2) addPartsPerMdPage(extras.partsPerMdDai2, 'Dai-2 Factory');
+
     doc.save(`${title}_${dayjs().format('YYYYMMDD_HHmmss')}.pdf`);
   } catch (e) { alert('PDF出力に失敗しました: ' + e.message); }
 }

@@ -80,13 +80,14 @@ function normalizeWorkerNames(input: any): string[] {
   return out
 }
 
-// 人工 (man_days) の正規化: 0〜1の範囲にクランプ、空欄は1
+// 人工 (man_days) の正規化: 0〜2の範囲にクランプ、空欄は1
+// 残業対応のため上限を2.0に拡張 (例: 1.0=通常, 1.25=少し残業, 1.5=長め, 2.0=最大)
 function clampManDays(v: any): number {
   if (v == null || v === '') return 1.0
   const n = Number(v)
   if (!isFinite(n)) return 1.0
   if (n < 0) return 0
-  if (n > 1) return 1.0
+  if (n > 2) return 2.0
   return n
 }
 
@@ -538,13 +539,19 @@ api.get('/analytics/workers', authMiddleware, async (c) => {
 
   // 1人工あたりの加工量 = r.total_qty / r.staff_count
   // 各人の加工量 = 1人工あたり × prw.man_days
+  // 各人の部位別加工量 = (r[part] / r.staff_count) × prw.man_days  (按分は staff_count比、man_days考慮)
+  // 各人の部位別人工数 = prw.man_days × (r[part] / r.total_qty)   ← 新しい計算
+  //   (= その人の人工を部位別数量比率で割り振る)
   const partSums = PART_KEYS.map(k => `(r.${k} * 1.0 / NULLIF(r.staff_count, 0)) * COALESCE(prw.man_days, 1.0) as part_${k}`).join(', ')
+  const partMdSums = PART_KEYS.map(k => `COALESCE(prw.man_days, 1.0) * (r.${k} * 1.0 / NULLIF(r.total_qty, 0)) as partmd_${k}`).join(', ')
   let sql = `
     SELECT prw.worker_name as worker_name, prw.factory as factory, prw.date as date,
            COALESCE(prw.man_days, 1.0) as man_days,
            (r.total_qty * 1.0 / NULLIF(r.staff_count, 0)) * COALESCE(prw.man_days, 1.0) as person_qty,
            r.staff_count as staff_count,
-           ${partSums}
+           r.total_qty as total_qty,
+           ${partSums},
+           ${partMdSums}
     FROM processing_record_workers prw
     JOIN processing_records r ON r.id = prw.processing_record_id
     WHERE 1=1
@@ -575,7 +582,9 @@ api.get('/analytics/workers', authMiddleware, async (c) => {
         honsha_man_days: 0,
         dai2_man_days: 0,
         dates: new Set<string>(),
-        ...Object.fromEntries(PART_KEYS.map(k => [k, 0]))
+        ...Object.fromEntries(PART_KEYS.map(k => [k, 0])),
+        // 部位別人工数の合計 (各日 prw.man_days × r[k] / r.total_qty の積算)
+        ...Object.fromEntries(PART_KEYS.map(k => ['partmd_' + k, 0]))
       })
     }
     const a = aggMap.get(name)
@@ -588,6 +597,7 @@ api.get('/analytics/workers', authMiddleware, async (c) => {
     a.dates.add(r.date)
     for (const k of PART_KEYS) {
       a[k] += Number(r['part_' + k]) || 0
+      a['partmd_' + k] += Number(r['partmd_' + k]) || 0
     }
   }
   const data = Array.from(aggMap.values()).map(a => {
@@ -603,13 +613,87 @@ api.get('/analytics/workers', authMiddleware, async (c) => {
       dai2_qty: a.dai2_qty,
       honsha_man_days: a.honsha_man_days,
       dai2_man_days: a.dai2_man_days,
-      ...Object.fromEntries(PART_KEYS.map(k => [k, a[k]]))
+      ...Object.fromEntries(PART_KEYS.map(k => [k, a[k]])),
+      // 部位別人工数 (新計算用: 部位別数量比率で按分された人工数)
+      ...Object.fromEntries(PART_KEYS.map(k => ['partmd_' + k, a['partmd_' + k]]))
     }
   })
   // 加工量降順
   data.sort((x, y) => y.total_qty - x.total_qty)
 
   return c.json({ data })
+})
+
+// ==== 部位別人工数集計 (新計算ルール) ====
+// 各日×工場ごとに staff_count を部位別数量比率で割り振り、合計を返す。
+// dateFrom/dateTo/year/factory による絞り込みを反映。
+// 計算式: 各日の部位別人工数 = その日の staff_count × その日の部位別数量 / その日の total_qty
+//   → 期間合計 = Σ (日別部位別人工数)
+//   → 期間部位別1人工あたり = 期間部位別数量合計 ÷ 期間部位別人工数合計
+api.get('/analytics/parts-per-manday', authMiddleware, async (c) => {
+  const url = new URL(c.req.url)
+  const dateFrom = url.searchParams.get('dateFrom') || ''
+  const dateTo = url.searchParams.get('dateTo') || ''
+  const year = url.searchParams.get('year') || ''
+  const month = url.searchParams.get('month') || ''
+  const factory = url.searchParams.get('factory') || 'all'
+
+  // 各レコード(=各日×工場)ごとに、部位別数量と total_qty, staff_count を取得
+  let sql = `SELECT date, factory, staff_count, total_qty,
+             foundation_qty, base_qty, column_qty, beam_qty, fukashi_qty,
+             slab_qty, doma_qty, civil_qty, wooden_qty, other_qty
+             FROM processing_records WHERE 1=1`
+  const params: any[] = []
+  if (dateFrom) { sql += ' AND date >= ?'; params.push(dateFrom) }
+  if (dateTo) { sql += ' AND date <= ?'; params.push(dateTo) }
+  if (year) { sql += ' AND substr(date,1,4) = ?'; params.push(year) }
+  if (month) { sql += ' AND substr(date,6,2) = ?'; params.push(month.padStart(2, '0')) }
+  if (factory && factory !== 'all') { sql += ' AND factory = ?'; params.push(factory) }
+  sql += ' ORDER BY date ASC, factory ASC'
+
+  const { results } = await c.env.DB.prepare(sql).bind(...params).all()
+  const rows = results as any[]
+
+  // 全体集計 (1工場分1日として扱う = (date, factory) が1単位)
+  const partsAll: Record<string, { qty: number; md: number }> = {}
+  // 工場別集計
+  const partsByFactory: Record<string, Record<string, { qty: number; md: number }>> = {}
+  PART_KEYS.forEach(k => { partsAll[k] = { qty: 0, md: 0 } })
+
+  for (const r of rows) {
+    const totalQty = Number(r.total_qty) || 0
+    const staffCount = Number(r.staff_count) || 0
+    const fac = String(r.factory || '')
+    if (!partsByFactory[fac]) {
+      partsByFactory[fac] = {}
+      PART_KEYS.forEach(k => { partsByFactory[fac][k] = { qty: 0, md: 0 } })
+    }
+    for (const k of PART_KEYS) {
+      const partQty = Number(r[k]) || 0
+      // 各日×工場ごとの部位別人工数 = staff_count × (part_qty / total_qty)
+      const partMd = totalQty > 0 ? staffCount * partQty / totalQty : 0
+      partsAll[k].qty += partQty
+      partsAll[k].md += partMd
+      partsByFactory[fac][k].qty += partQty
+      partsByFactory[fac][k].md += partMd
+    }
+  }
+
+  const formatParts = (m: Record<string, { qty: number; md: number }>) =>
+    PART_KEYS.map(k => ({
+      part_key: k,
+      total_qty: m[k].qty,
+      part_man_days: m[k].md,
+      qty_per_man_day: m[k].md > 0 ? m[k].qty / m[k].md : 0
+    }))
+
+  return c.json({
+    overall: formatParts(partsAll),
+    by_factory: Object.fromEntries(
+      Object.entries(partsByFactory).map(([fac, m]) => [fac, formatParts(m)])
+    ),
+    row_count: rows.length
+  })
 })
 
 // 月別 × 人員別 (推移グラフ用) — man_days考慮
