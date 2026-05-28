@@ -125,14 +125,16 @@ function normalizeWorkerNamesClient(v) {
 }
 
 // 人工 (man_days) の値を 0〜2 にクランプ (空欄→1, 数値以外→1, 負→0, 2超→2)
-// 残業対応のため上限を2.0に拡張 (例: 1.0=通常, 1.25=少し残業, 1.5=長め, 2.0=最大)
+// 残業対応のため上限を2.0、小数は第3位まで保持 (例: 0.125, 1.125, 1.525 等)
+// 浮動小数誤差対策として小数点第3位で丸めるが、3桁以内の入力は値が変わらない
 function clampManDaysClient(v) {
   if (v === '' || v == null) return 1;
   const n = Number(v);
   if (!isFinite(n) || isNaN(n)) return 1;
   if (n < 0) return 0;
   if (n > 2) return 2;
-  return n;
+  // 小数第3位で丸める (1.125 → 1.125, 0.1234 → 0.123)
+  return Math.round(n * 1000) / 1000;
 }
 
 // 人員配列の正規化: [{name, man_days}] 形式へ
@@ -180,12 +182,13 @@ function sumManDays(workers) {
   }, 0);
 }
 
-// 人工を見やすく整形 (1.0 → '1.0', 0.5 → '0.5', 2.5 → '2.5')
+// 人工を見やすく整形 (例: 1 → '1.0', 0.5 → '0.5', 1.125 → '1.125', 1.525 → '1.525', 4.025 → '4.025')
+// 小数点第3位までの値を保持 (末尾の余分な0は省略するが、最低でも1桁は表示)
 function fmtManDays(v) {
   const n = Number(v);
   if (!isFinite(n)) return '0';
-  // 小数点1桁を基本に、ぴったり整数でも .0 を表示
-  return n.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 2 });
+  // 第3位までの可変桁表示: 1.0/0.5/1.125/1.525 等
+  return n.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 3 });
 }
 
 // ========== ユーティリティ ==========
@@ -922,7 +925,7 @@ function renderInput(record = null) {
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">人員数（人工合計） <span id="staffAutoBadge" class="text-xs text-blue-600 hidden">(人工合計から自動計算)</span></label>
-            <input id="staff_count" type="number" min="0" step="0.25" value="${r.staff_count||''}" class="input-num" placeholder="例: 2.5" inputmode="decimal" />
+            <input id="staff_count" type="number" min="0" step="0.001" value="${r.staff_count||''}" class="input-num" placeholder="例: 2.5" inputmode="decimal" />
           </div>
         </div>
 
@@ -1006,7 +1009,7 @@ function renderInput(record = null) {
           </div>
           <div class="w-full sm:w-28">
             <label class="text-xs text-gray-500 sm:hidden">人工</label>
-            <input type="number" data-worker-md-idx="${i}" value="${fmtManDays(w.man_days)}" min="0" max="2" step="0.25" placeholder="1.0" class="input-num w-full" inputmode="decimal" title="人工 (1日=1.0、半日=0.5、残業=1.25/1.5/1.75、最大=2.0)" />
+            <input type="number" data-worker-md-idx="${i}" value="${fmtManDays(w.man_days)}" min="0" max="2" step="0.001" placeholder="1.0" class="input-num w-full" inputmode="decimal" title="人工 (1日=1.0、半日=0.5、残業=1.25/1.5/1.75、最大=2.0、小数第3位まで入力可)" />
           </div>
           <button type="button" data-worker-del="${i}" class="btn-danger text-sm whitespace-nowrap sm:w-auto" title="削除">
             <i class="fas fa-trash"></i><span class="hidden sm:inline ml-1">削除</span>

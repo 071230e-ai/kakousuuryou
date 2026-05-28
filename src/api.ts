@@ -81,14 +81,16 @@ function normalizeWorkerNames(input: any): string[] {
 }
 
 // 人工 (man_days) の正規化: 0〜2の範囲にクランプ、空欄は1
-// 残業対応のため上限を2.0に拡張 (例: 1.0=通常, 1.25=少し残業, 1.5=長め, 2.0=最大)
+// 残業対応のため上限を2.0、小数は第3位まで保持 (例: 0.125, 1.125, 1.525, 2.000)
+// 浮動小数誤差対策として小数第3位で丸めるが、3桁以内の入力は値が変わらない
 function clampManDays(v: any): number {
   if (v == null || v === '') return 1.0
   const n = Number(v)
   if (!isFinite(n)) return 1.0
   if (n < 0) return 0
   if (n > 2) return 2.0
-  return n
+  // 小数第3位で丸める (1.125 → 1.125, 0.1234 → 0.123)
+  return Math.round(n * 1000) / 1000
 }
 
 // 人員配列の正規化: [{name, man_days}] 形式を返す
