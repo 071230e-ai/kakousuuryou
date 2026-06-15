@@ -46,7 +46,7 @@ const PART_KEYS = [
   'slab_qty','doma_qty','civil_qty','wooden_qty','other_qty'
 ];
 const PART_LABELS = {
-  foundation_qty:'基礎', base_qty:'ベース', column_qty:'柱', beam_qty:'梁', fukashi_qty:'フカシ',
+  foundation_qty:'基礎', base_qty:'ベース', column_qty:'柱', beam_qty:'梁', fukashi_qty:'壁',
   slab_qty:'スラブ', doma_qty:'土間', civil_qty:'土木', wooden_qty:'木造', other_qty:'その他'
 };
 const PART_COLORS = {

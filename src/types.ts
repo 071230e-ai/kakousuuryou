@@ -52,7 +52,7 @@ export const PART_LABELS: Record<string, string> = {
   base_qty: 'ベース',
   column_qty: '柱',
   beam_qty: '梁',
-  fukashi_qty: 'フカシ',
+  fukashi_qty: '壁',
   slab_qty: 'スラブ',
   doma_qty: '土間',
   civil_qty: '土木',
