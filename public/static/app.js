@@ -1367,6 +1367,7 @@ async function renderDaily() {
           <button id="dPdf" class="btn-secondary text-sm"><i class="fas fa-file-pdf"></i></button>
         </div>
       </div>
+      <div id="dailySummary"></div>
       <div class="bg-white p-4 rounded-xl shadow-sm">
         <div class="relative" style="height:360px"><canvas id="dailyChart"></canvas></div>
       </div>
@@ -1379,8 +1380,10 @@ async function renderDaily() {
   const load = async () => {
     const tableEl = document.getElementById('dailyTable');
     const partsPerMdEl = document.getElementById('dailyPartsPerMd');
+    const summaryEl = document.getElementById('dailySummary');
     setSectionLoading(tableEl);
     if (partsPerMdEl) partsPerMdEl.innerHTML = '';
+    if (summaryEl) summaryEl.innerHTML = '';
     const dateFrom = document.getElementById('dFrom').value;
     const dateTo = document.getElementById('dTo').value;
     const factory = document.getElementById('dFactory').value;
@@ -1397,6 +1400,44 @@ async function renderDaily() {
       return;
     }
     data = safeArray(data);
+
+    // 指定期間の集計カード (加工総数量 / 総人工 / 1人工あたり加工数量)
+    // 工場区分・日付範囲は data がすでにフィルタ済み (api.daily / aggregateDailyLocal)
+    // データ0件でも "-" 表示でカードは出す (要件7: 期間にデータがない場合のエラー回避)
+    const renderSummaryCard = () => {
+      if (!summaryEl) return;
+      const totalQty = data.reduce((s, r) => s + safeNum(r.total_qty), 0);
+      const totalMd  = data.reduce((s, r) => s + safeNum(r.staff_count), 0);
+      const perMd    = totalMd > 0 ? (totalQty / totalMd) : 0;
+      const factoryLabel = factory === 'all' ? '全体合算' : factory;
+      const periodLabel = `${dateFrom || '-'} 〜 ${dateTo || '-'} / 工場: ${factoryLabel}`;
+      // 総人工は要件で「小数点第3位まで表示」とあるため、集計カード専用に3桁固定でフォーマット
+      // 例: 82.300、113.637、4.025
+      const fmtTotalMd = (n) => Number(n).toLocaleString('ja-JP', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+      summaryEl.innerHTML = `
+        <div class="bg-white p-4 rounded-xl shadow-sm">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h3 class="font-semibold text-gray-800"><i class="fas fa-calculator mr-1 text-blue-600"></i>指定期間の集計</h3>
+            <p class="text-xs text-gray-500">期間: ${escapeHtml(periodLabel)}</p>
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="stat-card all">
+              <div class="label"><i class="fas fa-weight-hanging mr-1"></i>加工総数量</div>
+              <div class="value">${data.length > 0 ? fmt.qty(totalQty) : '<span class="text-gray-400">-</span>'}</div>
+            </div>
+            <div class="stat-card honsha">
+              <div class="label"><i class="fas fa-users mr-1"></i>総人工</div>
+              <div class="value">${data.length > 0 ? fmtTotalMd(totalMd) + '<span class="text-base font-normal text-gray-600 ml-1">人工</span>' : '<span class="text-gray-400">-</span>'}</div>
+            </div>
+            <div class="stat-card dai2">
+              <div class="label"><i class="fas fa-chart-line mr-1"></i>1人工あたり加工数量</div>
+              <div class="value">${totalMd > 0 ? fmt.qty(perMd) + '<span class="text-base font-normal text-gray-600 ml-1">/人工</span>' : '<span class="text-gray-400">-</span>'}</div>
+            </div>
+          </div>
+        </div>
+      `;
+    };
+    renderSummaryCard();
 
     const dates = [...new Set(data.map(d => d.date))].sort();
     if (dates.length === 0) {
