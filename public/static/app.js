@@ -483,23 +483,18 @@ function renderLogin() {
         <form id="loginForm" class="space-y-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">ユーザー名</label>
-            <input id="username" type="text" required class="input-base" autocomplete="username" value="admin" />
+            <input id="username" type="text" required class="input-base" autocomplete="username" />
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">パスワード</label>
-            <input id="password" type="password" required class="input-base" autocomplete="current-password" value="admin123" />
+            <input id="password" type="password" required class="input-base" autocomplete="current-password" />
           </div>
           <button type="submit" class="btn-primary w-full">
             <i class="fas fa-sign-in-alt mr-2"></i>ログイン
           </button>
           <div id="loginError" class="text-red-600 text-sm text-center hidden"></div>
         </form>
-        <div class="mt-6 text-xs text-gray-500 border-t pt-4">
-          <p class="font-semibold">初期アカウント:</p>
-          <p>管理者: <code>admin</code> / <code>admin123</code></p>
-          <p>一般: <code>user1</code> / <code>user123</code></p>
-        </div>
-        <div class="mt-4 text-center">
+        <div class="mt-6 text-center border-t pt-4">
           <button id="sampleModeBtn" class="text-xs text-blue-600 hover:underline">
             <i class="fas fa-flask mr-1"></i>ダミーデータで画面を確認する (ログイン不要)
           </button>
