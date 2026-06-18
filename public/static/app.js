@@ -407,8 +407,6 @@ const api = {
   monthly(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/monthly', { params })).data.data || []); },
   yearly(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/yearly', { params })).data.data || []); },
   dashboard() { return this._safeRequest(async () => (await axios.get('/api/analytics/dashboard')).data); },
-  targets(year) { return this._safeRequest(async () => (await axios.get('/api/targets', { params: { year } })).data.targets || []); },
-  setTarget(data) { return this._safeRequest(async () => (await axios.post('/api/targets', data)).data); },
   workers() { return this._safeRequest(async () => (await axios.get('/api/workers')).data.workers || []); },
   workerAnalytics(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/workers', { params })).data.data || []); },
   workerMonthly(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/workers/monthly', { params })).data.data || []); },
@@ -563,9 +561,7 @@ function renderLayout() {
           ${navBtn('daily','calendar-day','日別分析')}
           ${navBtn('monthly','calendar-alt','月別分析')}
           ${navBtn('yearly','calendar','年間分析')}
-          ${navBtn('compare','balance-scale','工場比較')}
           ${navBtn('workers','users','人員別分析')}
-          ${u.role==='admin' && !state.useSampleData ? navBtn('target','bullseye','月間目標設定') : ''}
         </nav>
       </header>
       <main id="main" class="flex-1 max-w-7xl w-full mx-auto p-4"></main>
@@ -616,9 +612,7 @@ async function renderMain() {
       case 'daily': await renderDaily(); break;
       case 'monthly': await renderMonthly(); break;
       case 'yearly': await renderYearly(); break;
-      case 'compare': await renderCompare(); break;
       case 'workers': await renderWorkers(); break;
-      case 'target': await renderTargets(); break;
       default: renderDashboard();
     }
   } catch (err) {
@@ -664,18 +658,12 @@ async function renderDashboard() {
   const yearDai2    = safeNum(yearRows.find(r=>r?.factory==='第二工場')?.qty);
   const yearTotal   = yearHonsha + yearDai2;
 
-  // 月間目標 (失敗しても無視)
-  let targetThis = null;
-  if (!state.useSampleData) {
-    try {
-      const ym = String(data.month.ym || '').split('-');
-      if (ym.length === 2) {
-        const targets = await api.targets(ym[0]);
-        targetThis = safeArray(targets).find(t => Number(t.year)===Number(ym[0]) && Number(t.month)===Number(ym[1]) && t.factory==='全体');
-      }
-    } catch (e) { console.warn('targets取得失敗:', e.message); }
-  }
-  const targetRate = targetThis && targetThis.target_qty > 0 ? (monthTotal / targetThis.target_qty * 100) : null;
+  // トレーラー台数集計
+  const todayTrailer = todayRows.reduce((s,r)=>s+safeNum(r?.trailer_count),0);
+  const monthTrailer = monthRows.reduce((s,r)=>s+safeNum(r?.trailer_count),0);
+  const yearTrailer  = yearRows.reduce((s,r)=>s+safeNum(r?.trailer_count),0);
+  const monthTrailerHonsha = safeNum(monthRows.find(r=>r?.factory==='本社工場')?.trailer_count);
+  const monthTrailerDai2   = safeNum(monthRows.find(r=>r?.factory==='第二工場')?.trailer_count);
 
   // 部位別1人工あたり (新計算ルール: 日ごと算出を合計): 今月分をAPIから取得
   let monthPpmd = [];
@@ -734,17 +722,23 @@ async function renderDashboard() {
         </div>
       </div>
 
-      ${targetRate !== null ? `
-        <div class="bg-white p-4 rounded-xl shadow-sm">
-          <div class="flex justify-between text-sm mb-2">
-            <span class="font-semibold"><i class="fas fa-bullseye mr-1 text-orange-500"></i>今月目標達成率 (全体)</span>
-            <span class="font-bold">${targetRate.toFixed(1)}% (目標: ${fmt.qty(targetThis.target_qty)})</span>
-          </div>
-          <div class="w-full bg-gray-200 rounded-full h-4 overflow-hidden">
-            <div class="h-4 ${targetRate>=100?'bg-green-500':targetRate>=75?'bg-blue-500':targetRate>=50?'bg-yellow-500':'bg-red-500'}" style="width:${Math.min(targetRate,100)}%"></div>
-          </div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div class="stat-card" style="border-left:4px solid #d97706;background:#fffbeb">
+          <div class="label text-amber-800"><i class="fas fa-truck-moving mr-1"></i>今日のトレーラー台数</div>
+          <div class="value text-amber-900">${todayTrailer.toLocaleString('ja-JP')}<span class="text-base font-normal text-gray-600 ml-1">台</span></div>
+          <div class="sub">本社: ${safeNum(todayRows.find(r=>r?.factory==='本社工場')?.trailer_count).toLocaleString('ja-JP')}台 / 第二: ${safeNum(todayRows.find(r=>r?.factory==='第二工場')?.trailer_count).toLocaleString('ja-JP')}台</div>
         </div>
-      ` : ''}
+        <div class="stat-card" style="border-left:4px solid #d97706;background:#fffbeb">
+          <div class="label text-amber-800"><i class="fas fa-truck-moving mr-1"></i>今月のトレーラー台数</div>
+          <div class="value text-amber-900">${monthTrailer.toLocaleString('ja-JP')}<span class="text-base font-normal text-gray-600 ml-1">台</span></div>
+          <div class="sub">本社: ${monthTrailerHonsha.toLocaleString('ja-JP')}台 / 第二: ${monthTrailerDai2.toLocaleString('ja-JP')}台</div>
+        </div>
+        <div class="stat-card" style="border-left:4px solid #d97706;background:#fffbeb">
+          <div class="label text-amber-800"><i class="fas fa-truck-moving mr-1"></i>今年のトレーラー台数</div>
+          <div class="value text-amber-900">${yearTrailer.toLocaleString('ja-JP')}<span class="text-base font-normal text-gray-600 ml-1">台</span></div>
+          <div class="sub">${data.year.year}年合計</div>
+        </div>
+      </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div class="bg-white p-4 rounded-xl shadow-sm">
@@ -829,9 +823,10 @@ function buildDashboardFromRecords(records) {
         factory: f,
         qty: fs.reduce((s,r)=>s+safeNum(r.total_qty), 0),
         staff: fs.reduce((s,r)=>s+safeNum(r.staff_count), 0),
+        trailer_count: fs.reduce((s,r)=>s+safeNum(r.trailer_count), 0),
         days: new Set(fs.map(r=>r.date)).size
       };
-    }).filter(r => r.qty > 0 || r.staff > 0);
+    }).filter(r => r.qty > 0 || r.staff > 0 || r.trailer_count > 0);
     return rows;
   };
 
@@ -892,6 +887,7 @@ function renderInput(record = null) {
     staff_count: '',
     foundation_qty:'', base_qty:'', column_qty:'', beam_qty:'', fukashi_qty:'',
     slab_qty:'', doma_qty:'', civil_qty:'', wooden_qty:'', other_qty:'',
+    trailer_count: '',
     note: '',
     worker_names: [],
     workers: []
@@ -969,6 +965,19 @@ function renderInput(record = null) {
           <div>
             <p class="text-sm text-gray-600">1人工あたり加工数量</p>
             <p id="perDisplay" class="text-2xl font-bold text-green-700">0 kg</p>
+          </div>
+        </div>
+
+        <div class="bg-amber-50 border border-amber-200 p-4 rounded-lg">
+          <h3 class="font-semibold text-amber-900 mb-2">
+            <i class="fas fa-truck-moving mr-1"></i>材料搬入
+          </h3>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
+            <div>
+              <label class="block text-xs font-medium text-gray-700 mb-1">トレーラー台数 (台)</label>
+              <input id="trailer_count" type="number" min="0" step="0.5" value="${(r.trailer_count===0||r.trailer_count)?r.trailer_count:''}" class="input-num" placeholder="例: 0, 1, 2, 0.5, 1.5" inputmode="decimal" title="材料搬入トレーラー台数 (0以上の数値、0.5刻みで小数も入力可)" />
+            </div>
+            <p class="text-xs text-gray-600">未入力の場合は0台として扱います</p>
           </div>
         </div>
 
@@ -1118,6 +1127,10 @@ function renderInput(record = null) {
       }
       syncStaffFromWorkers();
       document.getElementById('note').value = prev.note || '';
+      // 材料搬入トレーラー台数もコピー (未定義/nullは0扱いの空表示)
+      const prevTrailer = safeNum(prev.trailer_count);
+      const trailerEl = document.getElementById('trailer_count');
+      if (trailerEl) trailerEl.value = prevTrailer > 0 ? prevTrailer : '';
       recalc();
       alert(`${prev.date} のデータをコピーしました（日付は今日のままです）`);
     } catch (e) {
@@ -1139,6 +1152,8 @@ function renderInput(record = null) {
       date: document.getElementById('date').value,
       factory: document.getElementById('factory').value,
       staff_count: document.getElementById('staff_count').value,
+      // 材料搬入トレーラー台数 (未入力は0、マイナス入力は0にクランプ)
+      trailer_count: Math.max(0, safeNum(document.getElementById('trailer_count').value)),
       note: document.getElementById('note').value,
       workers: cleanWorkers,
       // 後方互換: workers が空のときも worker_names を送る
@@ -1288,7 +1303,7 @@ function renderListTable() {
         <tr>
           <th>日付</th><th>工場</th><th>人工合計</th><th>人員名（人工）</th>
           ${PART_KEYS.map(k=>`<th class="part-${k.replace('_qty','')}">${PART_LABELS[k]}</th>`).join('')}
-          <th>総加工量</th><th>1人工あたり</th><th>備考</th><th class="no-print">操作</th>
+          <th>総加工量</th><th>1人工あたり</th><th class="part-trailer">トレーラー台数</th><th>備考</th><th class="no-print">操作</th>
         </tr>
       </thead>
       <tbody>
@@ -1309,6 +1324,7 @@ function renderListTable() {
             ${PART_KEYS.map(k=>`<td>${fmt.qty(r[k])}</td>`).join('')}
             <td class="font-bold">${fmt.qty(total)}</td>
             <td>${per>0?fmt.qty(per):'-'}</td>
+            <td class="text-amber-700 font-semibold">${safeNum(r.trailer_count).toLocaleString('ja-JP')} 台</td>
             <td class="text text-xs">${escapeHtml(r.note||'')}</td>
             <td class="no-print">
               <div class="flex gap-1 justify-center">
@@ -1409,6 +1425,7 @@ async function renderDaily() {
       const totalQty = data.reduce((s, r) => s + safeNum(r.total_qty), 0);
       const totalMd  = data.reduce((s, r) => s + safeNum(r.staff_count), 0);
       const perMd    = totalMd > 0 ? (totalQty / totalMd) : 0;
+      const totalTrailer = data.reduce((s, r) => s + safeNum(r.trailer_count), 0);
       const factoryLabel = factory === 'all' ? '全体合算' : factory;
       const periodLabel = `${dateFrom || '-'} 〜 ${dateTo || '-'} / 工場: ${factoryLabel}`;
       // 総人工は要件で「小数点第3位まで表示」とあるため、集計カード専用に3桁固定でフォーマット
@@ -1420,7 +1437,7 @@ async function renderDaily() {
             <h3 class="font-semibold text-gray-800"><i class="fas fa-calculator mr-1 text-blue-600"></i>指定期間の集計</h3>
             <p class="text-xs text-gray-500">期間: ${escapeHtml(periodLabel)}</p>
           </div>
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div class="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div class="stat-card all">
               <div class="label"><i class="fas fa-weight-hanging mr-1"></i>加工総数量</div>
               <div class="value">${data.length > 0 ? fmt.qty(totalQty) : '<span class="text-gray-400">-</span>'}</div>
@@ -1432,6 +1449,10 @@ async function renderDaily() {
             <div class="stat-card dai2">
               <div class="label"><i class="fas fa-chart-line mr-1"></i>1人工あたり加工数量</div>
               <div class="value">${totalMd > 0 ? fmt.qty(perMd) + '<span class="text-base font-normal text-gray-600 ml-1">/人工</span>' : '<span class="text-gray-400">-</span>'}</div>
+            </div>
+            <div class="stat-card" style="border-left:4px solid #d97706;background:#fffbeb">
+              <div class="label text-amber-800"><i class="fas fa-truck-moving mr-1"></i>トレーラー台数</div>
+              <div class="value text-amber-900">${totalTrailer.toLocaleString('ja-JP')}<span class="text-base font-normal text-gray-600 ml-1">台</span></div>
             </div>
           </div>
         </div>
@@ -1469,7 +1490,7 @@ async function renderDaily() {
         <thead><tr>
           <th>日付</th><th>工場</th><th>人工合計</th>
           ${PART_KEYS.map(k=>`<th>${PART_LABELS[k]}</th>`).join('')}
-          <th>合計</th><th>1人工あたり</th>
+          <th>合計</th><th>1人工あたり</th><th class="part-trailer">トレーラー台数</th>
         </tr></thead>
         <tbody>
           ${data.map(r => `<tr>
@@ -1479,6 +1500,7 @@ async function renderDaily() {
             ${PART_KEYS.map(k=>`<td>${fmt.qty(r[k])}</td>`).join('')}
             <td class="font-bold">${fmt.qty(r.total_qty)}</td>
             <td>${safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person):'-'}</td>
+            <td class="text-amber-700 font-semibold">${safeNum(r.trailer_count).toLocaleString('ja-JP')} 台</td>
           </tr>`).join('')}
         </tbody>
       </table>
@@ -1497,7 +1519,7 @@ async function renderDaily() {
     }
 
     document.getElementById('dCsv').onclick = () => {
-      exportCSV('日別分析', data, ['date','factory','staff_count',...PART_KEYS,'total_qty','qty_per_person']);
+      exportCSV('日別分析', data, ['date','factory','staff_count',...PART_KEYS,'total_qty','qty_per_person','trailer_count']);
       exportPartsPerManDayCSV('日別分析_部位別1人工あたり', partsData);
     };
     document.getElementById('dPdf').onclick = () => exportPDF('日別分析レポート', data, 'daily', { partsPerMd: partsData });
@@ -1514,10 +1536,11 @@ function aggregateDailyLocal(records, { dateFrom, dateTo, factory }) {
   const keys = {};
   r.forEach(rec => {
     const k = rec.date + '|' + rec.factory;
-    if (!keys[k]) keys[k] = { date: rec.date, factory: rec.factory, staff_count: 0, total_qty: 0 };
+    if (!keys[k]) keys[k] = { date: rec.date, factory: rec.factory, staff_count: 0, total_qty: 0, trailer_count: 0 };
     PART_KEYS.forEach(p => { keys[k][p] = safeNum(keys[k][p]) + safeNum(rec[p]); });
     keys[k].staff_count += safeNum(rec.staff_count);
     keys[k].total_qty += safeNum(rec.total_qty);
+    keys[k].trailer_count += safeNum(rec.trailer_count);
   });
   return Object.values(keys).map(k => ({
     ...k,
@@ -1551,9 +1574,11 @@ async function renderMonthly() {
           <button id="mPdf" class="btn-secondary text-sm"><i class="fas fa-file-pdf"></i></button>
         </div>
       </div>
+      <div id="monthlySummary"></div>
       <div class="bg-white p-4 rounded-xl shadow-sm">
         <div class="relative" style="height:360px"><canvas id="monthlyChart"></canvas></div>
       </div>
+      <div id="monthlyTrailerTable" class="bg-white rounded-xl shadow-sm overflow-x-auto"></div>
       <div id="monthlyTable" class="bg-white rounded-xl shadow-sm overflow-x-auto"></div>
       <div id="monthlyPartsPerMd"></div>
     </div>
@@ -1562,6 +1587,8 @@ async function renderMonthly() {
 
   const load = async () => {
     const tableEl = document.getElementById('monthlyTable');
+    const trailerTableEl = document.getElementById('monthlyTrailerTable');
+    const summaryEl = document.getElementById('monthlySummary');
     const partsPerMdEl = document.getElementById('monthlyPartsPerMd');
     setSectionLoading(tableEl);
     if (partsPerMdEl) partsPerMdEl.innerHTML = '';
@@ -1582,8 +1609,25 @@ async function renderMonthly() {
     data = safeArray(data);
     const months = [...new Set(data.map(d => d.ym))].sort();
 
+    // 年間トレーラー台数サマリカード (テーブル上部に表示)
+    const yearTrailerTotal = data.reduce((s, r) => s + safeNum(r.trailer_count), 0);
+    const factoryLabelM = factory === 'all' ? '全体合算' : factory;
+    if (summaryEl) {
+      summaryEl.innerHTML = `
+        <div class="bg-amber-50 border border-amber-200 p-4 rounded-xl shadow-sm">
+          <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <h3 class="font-semibold text-amber-900"><i class="fas fa-truck-moving mr-1"></i>${year}年 トレーラー台数(合計)</h3>
+            <p class="text-xs text-gray-600">工場: ${escapeHtml(factoryLabelM)}</p>
+          </div>
+          <div class="text-3xl font-bold text-amber-900">${yearTrailerTotal.toLocaleString('ja-JP')}<span class="text-base font-normal text-gray-600 ml-1">台</span></div>
+          <p class="text-xs text-gray-500 mt-1">表示中の月別データのトレーラー台数合計</p>
+        </div>
+      `;
+    }
+
     if (months.length === 0) {
       tableEl.innerHTML = `<div class="text-center py-10 text-gray-500"><i class="fas fa-inbox text-3xl"></i><p class="mt-2">表示できるデータがありません</p></div>`;
+      if (trailerTableEl) trailerTableEl.innerHTML = '';
       emptyChartMessage('monthlyChart');
       if (partsPerMdEl) {
         const empty = aggregatePartsPerManDay([]);
@@ -1606,10 +1650,36 @@ async function renderMonthly() {
       options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true, title: { display: true, text: state.qtyUnit } } } }
     });
 
+    // トレーラー台数 専用月別サマリ表 (見落とし防止のため、メインテーブルとは別に表示)
+    if (trailerTableEl) {
+      trailerTableEl.innerHTML = `
+        <div class="p-3 bg-amber-50 border-b border-amber-200">
+          <h3 class="font-semibold text-amber-900"><i class="fas fa-truck-moving mr-1"></i>月別 トレーラー台数</h3>
+          <p class="text-xs text-gray-600 mt-1">${year}年 / 工場: ${escapeHtml(factoryLabelM)}</p>
+        </div>
+        <table class="data-table">
+          <thead><tr>
+            <th>月</th><th>工場</th><th style="background:#fef3c7;color:#78350f">トレーラー台数</th>
+          </tr></thead>
+          <tbody>
+            ${data.map(r => `<tr>
+              <td class="text">${dayjs(r.ym+'-01').format('YYYY/M月')}</td>
+              <td class="text"><span class="px-2 py-1 rounded text-xs ${r.factory==='本社工場'?'badge-honsha':'badge-dai2'}">${escapeHtml(r.factory||'')}</span></td>
+              <td class="font-bold text-amber-800" style="background:#fffbeb;font-size:1.05em">${safeNum(r.trailer_count).toLocaleString('ja-JP')} 台</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      `;
+    }
+
     tableEl.innerHTML = `
+      <div class="p-3 bg-gray-50 border-b border-gray-200">
+        <h3 class="font-semibold text-gray-800"><i class="fas fa-table mr-1"></i>月別 詳細データ</h3>
+        <p class="text-xs text-gray-600 mt-1">部位別の月間合計 + トレーラー台数(右端列)</p>
+      </div>
       <table class="data-table">
         <thead><tr>
-          <th>月</th><th>工場</th><th>稼働日</th><th>延べ人工</th>
+          <th>月</th><th>工場</th><th>稼働日</th><th>延べ人工</th><th style="background:#fef3c7;color:#78350f;min-width:110px">トレーラー台数</th>
           ${PART_KEYS.map(k=>`<th>${PART_LABELS[k]}</th>`).join('')}
           <th>月間合計</th><th>1日平均</th><th>1人平均</th>
         </tr></thead>
@@ -1619,6 +1689,7 @@ async function renderMonthly() {
             <td class="text"><span class="px-2 py-1 rounded text-xs ${r.factory==='本社工場'?'badge-honsha':'badge-dai2'}">${escapeHtml(r.factory||'')}</span></td>
             <td>${safeNum(r.days)}</td>
             <td>${fmtManDays(safeNum(r.staff_count))}</td>
+            <td class="font-bold text-amber-800" style="background:#fffbeb">${safeNum(r.trailer_count).toLocaleString('ja-JP')} 台</td>
             ${PART_KEYS.map(k=>`<td>${fmt.qty(r[k])}</td>`).join('')}
             <td class="font-bold">${fmt.qty(r.total_qty)}</td>
             <td>${fmt.qty(r.avg_daily_qty)}</td>
@@ -1644,7 +1715,7 @@ async function renderMonthly() {
     }
 
     document.getElementById('mCsv').onclick = () => {
-      exportCSV('月別分析', data, ['ym','factory','days','staff_count',...PART_KEYS,'total_qty','avg_daily_qty','qty_per_person']);
+      exportCSV('月別分析', data, ['ym','factory','days','staff_count',...PART_KEYS,'total_qty','avg_daily_qty','qty_per_person','trailer_count']);
       exportPartsPerManDayCSV('月別分析_部位別1人工あたり', partsData);
     };
     document.getElementById('mPdf').onclick = () => exportPDF('月別分析レポート', data, 'monthly', { partsPerMd: partsData });
@@ -1661,10 +1732,11 @@ function aggregateMonthlyLocal(records, { year, factory }) {
   r.forEach(rec => {
     const ym = (rec.date||'').slice(0,7);
     const k = ym + '|' + rec.factory;
-    if (!keys[k]) keys[k] = { ym, factory: rec.factory, staff_count: 0, total_qty: 0, days_set: new Set() };
+    if (!keys[k]) keys[k] = { ym, factory: rec.factory, staff_count: 0, total_qty: 0, trailer_count: 0, days_set: new Set() };
     PART_KEYS.forEach(p => { keys[k][p] = safeNum(keys[k][p]) + safeNum(rec[p]); });
     keys[k].staff_count += safeNum(rec.staff_count);
     keys[k].total_qty += safeNum(rec.total_qty);
+    keys[k].trailer_count += safeNum(rec.trailer_count);
     keys[k].days_set.add(rec.date);
   });
   return Object.values(keys).map(k => {
@@ -1802,12 +1874,28 @@ async function renderYearly() {
       });
     } else emptyChartMessage('yearPartsChart');
 
+    // 年間トレーラー台数サマリ + 月別推移カード
+    const totalTrailerYearly = data.reduce((s, r) => s + safeNum(r.trailer_count), 0);
+    const monthlyTrailer = Array.from({length:12}, (_,i) => {
+      const ym = `${trendYear}-${String(i+1).padStart(2,'0')}`;
+      return monthly.filter(x => x.ym === ym).reduce((s,r) => s + safeNum(r.trailer_count), 0);
+    });
+    const factoryLabelY = factory === 'all' ? '全体合算' : factory;
+
     tableEl.innerHTML = `
+      <div class="bg-amber-50 border border-amber-200 p-4 rounded-xl shadow-sm mb-3">
+        <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <h3 class="font-semibold text-amber-900"><i class="fas fa-truck-moving mr-1"></i>年間トレーラー台数</h3>
+          <p class="text-xs text-gray-600">工場: ${escapeHtml(factoryLabelY)}</p>
+        </div>
+        <div class="text-3xl font-bold text-amber-900">${totalTrailerYearly.toLocaleString('ja-JP')}<span class="text-base font-normal text-gray-600 ml-1">台</span></div>
+        <p class="text-xs text-gray-500 mt-1">全年合計（表示中の年データの合計）</p>
+      </div>
       <table class="data-table">
         <thead><tr>
           <th>年</th><th>工場</th><th>稼働日</th><th>延べ人工</th>
           ${PART_KEYS.map(k=>`<th>${PART_LABELS[k]}</th>`).join('')}
-          <th>年間合計</th><th>1人工あたり</th>
+          <th>年間合計</th><th>1人工あたり</th><th class="part-trailer">トレーラー台数</th>
         </tr></thead>
         <tbody>
           ${data.map(r => `<tr>
@@ -1818,10 +1906,31 @@ async function renderYearly() {
             ${PART_KEYS.map(k=>`<td>${fmt.qty(r[k])}</td>`).join('')}
             <td class="font-bold">${fmt.qty(r.total_qty)}</td>
             <td>${safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person):'-'}</td>
+            <td class="text-amber-700 font-semibold">${safeNum(r.trailer_count).toLocaleString('ja-JP')} 台</td>
           </tr>`).join('')}
         </tbody>
       </table>
+      <div class="bg-white p-4 rounded-xl shadow-sm mt-3">
+        <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <h3 class="font-semibold text-gray-800"><i class="fas fa-chart-bar mr-1 text-amber-600"></i>${trendYear}年 月別トレーラー台数推移</h3>
+          <p class="text-xs text-gray-500">工場: ${escapeHtml(factoryLabelY)}</p>
+        </div>
+        <div class="relative" style="height:280px"><canvas id="trailerTrendChart"></canvas></div>
+      </div>
     `;
+    // 月別トレーラー棒グラフ描画
+    if (monthlyTrailer.some(v => v > 0)) {
+      safeCreateChart('trailerTrendChart', {
+        type: 'bar',
+        data: {
+          labels: Array.from({length:12}, (_,i)=>`${i+1}月`),
+          datasets: [{ label: 'トレーラー台数 (台)', data: monthlyTrailer, backgroundColor: '#d97706' }]
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } }
+      });
+    } else {
+      emptyChartMessage('trailerTrendChart');
+    }
     // 部位別1人工あたり加工数量 (年間=全データ / 日ごとに算出して合計 → APIに委譲)
     let partsData = [];
     try {
@@ -1839,7 +1948,7 @@ async function renderYearly() {
     }
 
     document.getElementById('yCsv').onclick = () => {
-      exportCSV('年間分析', data, ['year','factory','days','staff_count',...PART_KEYS,'total_qty','qty_per_person']);
+      exportCSV('年間分析', data, ['year','factory','days','staff_count',...PART_KEYS,'total_qty','qty_per_person','trailer_count']);
       exportPartsPerManDayCSV('年間分析_部位別1人工あたり', partsData);
     };
     document.getElementById('yPdf').onclick = () => exportPDF('年間分析レポート', data, 'yearly', { partsPerMd: partsData });
@@ -1855,10 +1964,11 @@ function aggregateYearlyLocal(records, { factory }) {
   r.forEach(rec => {
     const y = (rec.date||'').slice(0,4);
     const k = y + '|' + rec.factory;
-    if (!keys[k]) keys[k] = { year: y, factory: rec.factory, staff_count: 0, total_qty: 0, days_set: new Set() };
+    if (!keys[k]) keys[k] = { year: y, factory: rec.factory, staff_count: 0, total_qty: 0, trailer_count: 0, days_set: new Set() };
     PART_KEYS.forEach(p => { keys[k][p] = safeNum(keys[k][p]) + safeNum(rec[p]); });
     keys[k].staff_count += safeNum(rec.staff_count);
     keys[k].total_qty += safeNum(rec.total_qty);
+    keys[k].trailer_count += safeNum(rec.trailer_count);
     keys[k].days_set.add(rec.date);
   });
   return Object.values(keys).map(k => ({
@@ -1867,228 +1977,6 @@ function aggregateYearlyLocal(records, { factory }) {
     qty_per_person: k.staff_count > 0 ? k.total_qty / k.staff_count : 0
   })).sort((a,b) => a.year.localeCompare(b.year));
 }
-
-// ========== 工場比較 ==========
-async function renderCompare() {
-  const main = document.getElementById('main');
-  main.innerHTML = `
-    <div class="space-y-4">
-      ${state.useSampleData ? sampleBanner() : ''}
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <h2 class="text-xl font-bold text-gray-800"><i class="fas fa-balance-scale mr-2"></i>工場比較</h2>
-        ${unitToggle()}
-      </div>
-      <div class="bg-white p-4 rounded-xl shadow-sm grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div><label class="block text-xs text-gray-600 mb-1">年</label><input id="cYear" type="number" value="${new Date().getFullYear()}" class="input-base" /></div>
-        <div class="flex items-end gap-2 md:col-span-3 flex-wrap">
-          <button id="cApply" class="btn-primary text-sm"><i class="fas fa-search mr-1"></i>表示</button>
-          <button id="cCsv" class="btn-secondary text-sm"><i class="fas fa-file-csv mr-1"></i>CSV</button>
-          <button id="cPdf" class="btn-secondary text-sm"><i class="fas fa-file-pdf mr-1"></i>PDF</button>
-        </div>
-      </div>
-      <div id="compareKpi" class="grid grid-cols-1 md:grid-cols-3 gap-4"></div>
-      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div class="bg-white p-4 rounded-xl shadow-sm"><h3 class="font-semibold mb-2">月別比較</h3><div class="relative" style="height:340px"><canvas id="cmpMonth"></canvas></div></div>
-        <div class="bg-white p-4 rounded-xl shadow-sm"><h3 class="font-semibold mb-2">部位別比較</h3><div class="relative" style="height:340px"><canvas id="cmpParts"></canvas></div></div>
-      </div>
-      <div id="cmpTable" class="bg-white rounded-xl shadow-sm overflow-x-auto"></div>
-      <div id="cmpPartsPerMd" class="space-y-4"></div>
-    </div>
-  `;
-  bindUnitToggle();
-  const load = async () => {
-    const tableEl = document.getElementById('cmpTable');
-    const partsPerMdEl = document.getElementById('cmpPartsPerMd');
-    setSectionLoading(tableEl);
-    if (partsPerMdEl) partsPerMdEl.innerHTML = '';
-    const year = document.getElementById('cYear').value;
-    let data = [];
-    try {
-      data = state.useSampleData
-        ? aggregateMonthlyLocal(SAMPLE_RECORDS, { year })
-        : await api.monthly({ year });
-    } catch (e) {
-      setSectionError(tableEl, e.message, { retry: load, sample: () => { state.useSampleData = true; load(); } });
-      ['cmpMonth','cmpParts'].forEach(emptyChartMessage);
-      return;
-    }
-    data = safeArray(data);
-    const honsha = data.filter(d=>d.factory==='本社工場');
-    const dai2 = data.filter(d=>d.factory==='第二工場');
-    const honshaTotal = sumKey(honsha, 'total_qty');
-    const dai2Total = sumKey(dai2, 'total_qty');
-    const honshaStaff = sumKey(honsha, 'staff_count');
-    const dai2Staff = sumKey(dai2, 'staff_count');
-
-    document.getElementById('compareKpi').innerHTML = `
-      <div class="stat-card honsha"><div class="label">本社工場 (${year}年)</div><div class="value text-blue-700">${fmt.qty(honshaTotal)}</div><div class="sub">延べ${fmtManDays(honshaStaff)}人工 / 1人工あたり ${honshaStaff>0?fmt.qty(honshaTotal/honshaStaff):'-'}</div></div>
-      <div class="stat-card dai2"><div class="label">第二工場 (${year}年)</div><div class="value text-green-700">${fmt.qty(dai2Total)}</div><div class="sub">延べ${fmtManDays(dai2Staff)}人工 / 1人工あたり ${dai2Staff>0?fmt.qty(dai2Total/dai2Staff):'-'}</div></div>
-      <div class="stat-card all"><div class="label">合計</div><div class="value">${fmt.qty(honshaTotal+dai2Total)}</div><div class="sub">本社 ${honshaTotal+dai2Total>0?(honshaTotal/(honshaTotal+dai2Total)*100).toFixed(1):0}% / 第二 ${honshaTotal+dai2Total>0?(dai2Total/(honshaTotal+dai2Total)*100).toFixed(1):0}%</div></div>
-    `;
-
-    const months = Array.from({length:12},(_,i)=>`${year}-${String(i+1).padStart(2,'0')}`);
-    const mh = months.map(m => fmt.qtyVal(honsha.find(x=>x.ym===m)?.total_qty||0));
-    const md = months.map(m => fmt.qtyVal(dai2.find(x=>x.ym===m)?.total_qty||0));
-    if (honshaTotal + dai2Total > 0) {
-      safeCreateChart('cmpMonth', {
-        type:'bar',
-        data:{ labels: months.map(m => dayjs(m+'-01').format('M月')), datasets: [
-          { label:'本社工場', data: mh, backgroundColor: FACTORY_COLORS['本社工場'] },
-          { label:'第二工場', data: md, backgroundColor: FACTORY_COLORS['第二工場'] }
-        ]},
-        options:{ responsive:true, maintainAspectRatio:false, scales:{y:{beginAtZero:true, title:{display:true,text:state.qtyUnit}}}}
-      });
-
-      const ph = PART_KEYS.map(k => fmt.qtyVal(sumKey(honsha, k)));
-      const pd = PART_KEYS.map(k => fmt.qtyVal(sumKey(dai2, k)));
-      safeCreateChart('cmpParts', {
-        type:'bar',
-        data:{ labels: PART_KEYS.map(k=>PART_LABELS[k]), datasets:[
-          { label:'本社工場', data: ph, backgroundColor: FACTORY_COLORS['本社工場'] },
-          { label:'第二工場', data: pd, backgroundColor: FACTORY_COLORS['第二工場'] }
-        ]},
-        options:{ responsive:true, maintainAspectRatio:false, scales:{y:{beginAtZero:true, title:{display:true,text:state.qtyUnit}}}}
-      });
-    } else {
-      emptyChartMessage('cmpMonth');
-      emptyChartMessage('cmpParts');
-    }
-
-    tableEl.innerHTML = `
-      <table class="data-table">
-        <thead><tr><th>月</th><th>本社工場</th><th>第二工場</th><th>合計</th><th>本社比率</th></tr></thead>
-        <tbody>
-          ${months.map(m => {
-            const h = safeNum(honsha.find(x=>x.ym===m)?.total_qty);
-            const d = safeNum(dai2.find(x=>x.ym===m)?.total_qty);
-            const t = h + d;
-            return `<tr>
-              <td class="text">${dayjs(m+'-01').format('YYYY/M月')}</td>
-              <td>${fmt.qty(h)}</td>
-              <td>${fmt.qty(d)}</td>
-              <td class="font-bold">${fmt.qty(t)}</td>
-              <td>${t>0?(h/t*100).toFixed(1)+'%':'-'}</td>
-            </tr>`;
-          }).join('')}
-        </tbody>
-      </table>
-    `;
-
-    // 部位別1人工あたり加工数量 (工場ごと + 全体) — 日ごとに算出して合計 → APIに委譲
-    let partsAll = [], partsHonsha = [], partsDai2 = [];
-    try {
-      const ppmd = await fetchPartsPerManDay({ year });
-      partsAll = ppmd.overall || [];
-      partsHonsha = (ppmd.byFactory && ppmd.byFactory['本社工場']) || [];
-      partsDai2 = (ppmd.byFactory && ppmd.byFactory['第二工場']) || [];
-      // 部位カバレッジ補完 (該当工場データなしでも空配列を整形)
-      if (partsHonsha.length === 0) partsHonsha = aggregatePartsPerManDay([]);
-      if (partsDai2.length === 0) partsDai2 = aggregatePartsPerManDay([]);
-    } catch (e) { console.warn('[compare partsPerManDay]', e.message); }
-    if (partsPerMdEl) {
-      partsPerMdEl.innerHTML = `
-        ${renderPartsPerManDayTable(partsAll, {
-          title: '部位別 1人工あたり加工数量（全体合算）',
-          subtitle: `年: ${year}`,
-          canvasId: 'cmpPartsPerMdChartAll'
-        })}
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          ${renderPartsPerManDayTable(partsHonsha, {
-            title: '部位別 1人工あたり加工数量（本社工場）',
-            subtitle: `年: ${year}`,
-            canvasId: 'cmpPartsPerMdChartHonsha'
-          })}
-          ${renderPartsPerManDayTable(partsDai2, {
-            title: '部位別 1人工あたり加工数量（第二工場）',
-            subtitle: `年: ${year}`,
-            canvasId: 'cmpPartsPerMdChartDai2'
-          })}
-        </div>
-      `;
-      drawPartsPerManDayChart('cmpPartsPerMdChartAll', partsAll);
-      drawPartsPerManDayChart('cmpPartsPerMdChartHonsha', partsHonsha);
-      drawPartsPerManDayChart('cmpPartsPerMdChartDai2', partsDai2);
-    }
-
-    document.getElementById('cCsv').onclick = () => {
-      const rows = months.map(m => {
-        const h = safeNum(honsha.find(x=>x.ym===m)?.total_qty);
-        const d = safeNum(dai2.find(x=>x.ym===m)?.total_qty);
-        return { 月: m, 本社工場: h, 第二工場: d, 合計: h+d };
-      });
-      exportCSV('工場別比較', rows, ['月','本社工場','第二工場','合計']);
-      exportPartsPerManDayCSV('工場別比較_部位別1人工あたり_全体', partsAll);
-      exportPartsPerManDayCSV('工場別比較_部位別1人工あたり_本社工場', partsHonsha);
-      exportPartsPerManDayCSV('工場別比較_部位別1人工あたり_第二工場', partsDai2);
-    };
-    document.getElementById('cPdf').onclick = () => exportPDF('工場別比較レポート', data, 'compare', {
-      partsPerMd: partsAll, partsPerMdHonsha: partsHonsha, partsPerMdDai2: partsDai2
-    });
-  };
-  document.getElementById('cApply').addEventListener('click', load);
-  await load();
-}
-
-// ========== 月間目標設定 ==========
-async function renderTargets() {
-  const main = document.getElementById('main');
-  const year = new Date().getFullYear();
-  let targets = [];
-  try { targets = await api.targets(year); } catch (e) { targets = []; }
-  targets = safeArray(targets);
-  main.innerHTML = `
-    <div class="space-y-4">
-      <h2 class="text-xl font-bold text-gray-800"><i class="fas fa-bullseye mr-2"></i>月間目標設定 (${year}年)</h2>
-      <div class="bg-white p-4 rounded-xl shadow-sm">
-        <form id="targetForm" class="grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
-          <div><label class="block text-xs text-gray-600 mb-1">年</label><input id="tYear" type="number" value="${year}" class="input-base" /></div>
-          <div><label class="block text-xs text-gray-600 mb-1">月</label>
-            <select id="tMonth" class="input-base">${Array.from({length:12},(_,i)=>i+1).map(m=>`<option value="${m}">${m}月</option>`).join('')}</select>
-          </div>
-          <div><label class="block text-xs text-gray-600 mb-1">工場</label>
-            <select id="tFactory" class="input-base">
-              <option value="本社工場">本社工場</option>
-              <option value="第二工場">第二工場</option>
-              <option value="全体">全体</option>
-            </select>
-          </div>
-          <div><label class="block text-xs text-gray-600 mb-1">目標 (kg)</label><input id="tQty" type="number" min="0" step="100" class="input-num" inputmode="numeric" /></div>
-          <button type="submit" class="btn-primary"><i class="fas fa-save mr-1"></i>登録/更新</button>
-        </form>
-      </div>
-      <div class="bg-white rounded-xl shadow-sm overflow-x-auto">
-        <table class="data-table">
-          <thead><tr><th>年</th><th>月</th><th>工場</th><th>目標</th></tr></thead>
-          <tbody>
-            ${targets.length === 0 ? '<tr><td colspan="4" class="text-center text-gray-500 py-4">未登録</td></tr>' :
-              targets.map(t => `<tr>
-                <td class="text">${t.year}</td>
-                <td class="text">${t.month}月</td>
-                <td class="text">${escapeHtml(t.factory||'')}</td>
-                <td>${fmt.qty(t.target_qty)}</td>
-              </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  `;
-  document.getElementById('targetForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    try {
-      await api.setTarget({
-        year: safeNum(document.getElementById('tYear').value),
-        month: safeNum(document.getElementById('tMonth').value),
-        factory: document.getElementById('tFactory').value,
-        target_qty: safeNum(document.getElementById('tQty').value)
-      });
-      alert('保存しました');
-      renderTargets();
-    } catch (err) {
-      alert('保存に失敗しました: ' + (err.message || ''));
-    }
-  });
-}
-
 
 // ========== 人員別分析 ==========
 // サンプルモード用のローカル集計 (各日の総加工量を人員数で割る方式)
@@ -2784,7 +2672,7 @@ function exportWorkerPDF() {
 function exportCSV(name, rows, keys) {
   rows = safeArray(rows);
   if (rows.length === 0) { alert('データがありません'); return; }
-  const labelMap = { ...PART_LABELS, date:'日付', factory:'工場', staff_count:'人員数（人工合計）', worker_names:'人員名', worker_name:'人員名', workers:'人員（人工）', total_qty:'総加工量(kg)', qty_per_person:'1人工あたり(kg)', qty_per_man_day:'1人工あたり加工量(kg)', man_days_total:'人工合計', honsha_man_days:'本社工場の人工', dai2_man_days:'第二工場の人工', ym:'年月', year:'年', days:'参加日数', avg_daily_qty:'1日平均(kg)', honsha_qty:'本社工場(kg)', dai2_qty:'第二工場(kg)', person_qty:'按分加工量(kg)', note:'備考' };
+  const labelMap = { ...PART_LABELS, date:'日付', factory:'工場', staff_count:'人員数（人工合計）', worker_names:'人員名', worker_name:'人員名', workers:'人員（人工）', total_qty:'総加工量(kg)', qty_per_person:'1人工あたり(kg)', qty_per_man_day:'1人工あたり加工量(kg)', man_days_total:'人工合計', honsha_man_days:'本社工場の人工', dai2_man_days:'第二工場の人工', ym:'年月', year:'年', days:'参加日数', avg_daily_qty:'1日平均(kg)', honsha_qty:'本社工場(kg)', dai2_qty:'第二工場(kg)', person_qty:'按分加工量(kg)', note:'備考', trailer_count:'トレーラー台数(台)' };
   const header = keys.map(k => labelMap[k] || k).join(',');
   const body = rows.map(r => keys.map(k => {
     const v = r ? r[k] : '';
@@ -2814,7 +2702,7 @@ function exportListCSV() {
       worker_names: wlist.map(w => w.name).join('、')
     };
   });
-  const keys = ['date','factory','staff_count','workers',...PART_KEYS,'total_qty','qty_per_person','note'];
+  const keys = ['date','factory','staff_count','workers',...PART_KEYS,'total_qty','qty_per_person','trailer_count','note'];
   exportCSV('加工実績一覧', rows, keys);
 }
 
@@ -2828,7 +2716,7 @@ function exportListPDF() {
     doc.text('Murata Tekkin - Processing Records', 14, 14);
     doc.setFontSize(9);
     doc.text(`Generated: ${dayjs().format('YYYY-MM-DD HH:mm')}  Unit: ${state.qtyUnit}`, 14, 20);
-    const head = [['Date','Factory','ManDays','Workers(ManDays)', ...PART_KEYS.map(k => PART_LABELS[k]), 'Total','Per ManDay']];
+    const head = [['Date','Factory','ManDays','Workers(ManDays)', ...PART_KEYS.map(k => PART_LABELS[k]), 'Total','Per ManDay','Trailer']];
     const body = records.map(r => {
       const wlist = normalizeWorkersClient(r.workers, r.worker_names);
       const wStr = wlist.length ? wlist.map(w => `${w.name}(${fmtManDays(w.man_days)})`).join('、') : '-';
@@ -2836,7 +2724,8 @@ function exportListPDF() {
         r.date, r.factory, fmtManDays(safeNum(r.staff_count)), wStr,
         ...PART_KEYS.map(k => fmt.qty(r[k]).replace(/\s.*/,'')),
         fmt.qty(r.total_qty).replace(/\s.*/,''),
-        safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person).replace(/\s.*/,''):'-'
+        safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person).replace(/\s.*/,''):'-',
+        safeNum(r.trailer_count).toLocaleString('ja-JP')
       ];
     });
     doc.autoTable({ head, body, startY: 24, styles: { fontSize: 7, cellPadding: 1 }, headStyles: { fillColor: [37,99,235] } });
@@ -2856,14 +2745,19 @@ function exportPDF(title, data, kind, extras = {}) {
     doc.text(`Generated: ${dayjs().format('YYYY-MM-DD HH:mm')}  Unit: ${state.qtyUnit}`, 14, 20);
     let head, body;
     if (kind === 'daily') {
-      head = [['Date','Factory','Staff', ...PART_KEYS.map(k=>PART_LABELS[k]), 'Total','PerPerson']];
-      body = data.map(r => [r.date, r.factory, safeNum(r.staff_count), ...PART_KEYS.map(k=>fmt.qty(r[k]).replace(/\s.*/,'')), fmt.qty(r.total_qty).replace(/\s.*/,''), safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person).replace(/\s.*/,''):'-']);
+      head = [['Date','Factory','Staff', ...PART_KEYS.map(k=>PART_LABELS[k]), 'Total','PerPerson','Trailer']];
+      body = data.map(r => [r.date, r.factory, safeNum(r.staff_count), ...PART_KEYS.map(k=>fmt.qty(r[k]).replace(/\s.*/,'')), fmt.qty(r.total_qty).replace(/\s.*/,''), safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person).replace(/\s.*/,''):'-', safeNum(r.trailer_count).toLocaleString('ja-JP')]);
+      // 期間トレーラー合計のサマリ
+      const totalTrailer = data.reduce((s,r)=>s+safeNum(r.trailer_count),0);
+      doc.text(`Trailer Total: ${totalTrailer.toLocaleString('ja-JP')} dai`, 14, 26);
     } else if (kind === 'monthly') {
-      head = [['Month','Factory','Days','Staff', ...PART_KEYS.map(k=>PART_LABELS[k]), 'Total','AvgDaily','PerPerson']];
-      body = data.map(r => [r.ym, r.factory, safeNum(r.days), safeNum(r.staff_count), ...PART_KEYS.map(k=>fmt.qty(r[k]).replace(/\s.*/,'')), fmt.qty(r.total_qty).replace(/\s.*/,''), fmt.qty(r.avg_daily_qty).replace(/\s.*/,''), safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person).replace(/\s.*/,''):'-']);
+      head = [['Month','Factory','Days','Staff', ...PART_KEYS.map(k=>PART_LABELS[k]), 'Total','AvgDaily','PerPerson','Trailer']];
+      body = data.map(r => [r.ym, r.factory, safeNum(r.days), safeNum(r.staff_count), ...PART_KEYS.map(k=>fmt.qty(r[k]).replace(/\s.*/,'')), fmt.qty(r.total_qty).replace(/\s.*/,''), fmt.qty(r.avg_daily_qty).replace(/\s.*/,''), safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person).replace(/\s.*/,''):'-', safeNum(r.trailer_count).toLocaleString('ja-JP')]);
     } else if (kind === 'yearly') {
-      head = [['Year','Factory','Days','Staff', ...PART_KEYS.map(k=>PART_LABELS[k]), 'Total','PerPerson']];
-      body = data.map(r => [r.year, r.factory, safeNum(r.days), safeNum(r.staff_count), ...PART_KEYS.map(k=>fmt.qty(r[k]).replace(/\s.*/,'')), fmt.qty(r.total_qty).replace(/\s.*/,''), safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person).replace(/\s.*/,''):'-']);
+      head = [['Year','Factory','Days','Staff', ...PART_KEYS.map(k=>PART_LABELS[k]), 'Total','PerPerson','Trailer']];
+      body = data.map(r => [r.year, r.factory, safeNum(r.days), safeNum(r.staff_count), ...PART_KEYS.map(k=>fmt.qty(r[k]).replace(/\s.*/,'')), fmt.qty(r.total_qty).replace(/\s.*/,''), safeNum(r.qty_per_person)>0?fmt.qty(r.qty_per_person).replace(/\s.*/,''):'-', safeNum(r.trailer_count).toLocaleString('ja-JP')]);
+      const totalTrailer = data.reduce((s,r)=>s+safeNum(r.trailer_count),0);
+      doc.text(`Trailer Total (filtered years): ${totalTrailer.toLocaleString('ja-JP')} dai`, 14, 26);
     } else {
       head = [['Month','Factory','Total']];
       body = data.map(r => [r.ym || r.year, r.factory, fmt.qty(r.total_qty).replace(/\s.*/,'')]);

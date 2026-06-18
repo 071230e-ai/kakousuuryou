@@ -277,10 +277,11 @@ api.post('/records', authMiddleware, async (c) => {
   const { total_qty, qty_per_person } = calcTotals(recordForCalc)
   const workerNamesArr = workers.map(w => w.name) // 後方互換用
 
+  const trailerCount = Math.max(0, Number(body.trailer_count) || 0)
   const result = await c.env.DB.prepare(`
     INSERT INTO processing_records
-    (date, factory, staff_count, foundation_qty, base_qty, column_qty, beam_qty, fukashi_qty, slab_qty, doma_qty, civil_qty, wooden_qty, other_qty, total_qty, qty_per_person, note, created_by, worker_names, workers_json)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (date, factory, staff_count, foundation_qty, base_qty, column_qty, beam_qty, fukashi_qty, slab_qty, doma_qty, civil_qty, wooden_qty, other_qty, total_qty, qty_per_person, note, created_by, worker_names, workers_json, trailer_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     body.date, body.factory, staffCount,
     Number(body.foundation_qty) || 0, Number(body.base_qty) || 0, Number(body.column_qty) || 0,
@@ -288,7 +289,8 @@ api.post('/records', authMiddleware, async (c) => {
     Number(body.doma_qty) || 0, Number(body.civil_qty) || 0, Number(body.wooden_qty) || 0,
     Number(body.other_qty) || 0, total_qty, qty_per_person, body.note || null, user.id,
     workerNamesArr.length ? JSON.stringify(workerNamesArr) : null,
-    workers.length ? JSON.stringify(workers) : null
+    workers.length ? JSON.stringify(workers) : null,
+    trailerCount
   ).run()
 
   const recordId = Number(result.meta.last_row_id)
@@ -316,11 +318,12 @@ api.put('/records/:id', authMiddleware, async (c) => {
   const { total_qty, qty_per_person } = calcTotals(recordForCalc)
   const workerNamesArr = workers.map(w => w.name)
 
+  const trailerCount = Math.max(0, Number(body.trailer_count) || 0)
   await c.env.DB.prepare(`
     UPDATE processing_records SET
       date=?, factory=?, staff_count=?, foundation_qty=?, base_qty=?, column_qty=?, beam_qty=?,
       fukashi_qty=?, slab_qty=?, doma_qty=?, civil_qty=?, wooden_qty=?, other_qty=?,
-      total_qty=?, qty_per_person=?, note=?, worker_names=?, workers_json=?, updated_at=CURRENT_TIMESTAMP
+      total_qty=?, qty_per_person=?, note=?, worker_names=?, workers_json=?, trailer_count=?, updated_at=CURRENT_TIMESTAMP
     WHERE id=?
   `).bind(
     body.date, body.factory, staffCount,
@@ -330,6 +333,7 @@ api.put('/records/:id', authMiddleware, async (c) => {
     Number(body.other_qty) || 0, total_qty, qty_per_person, body.note || null,
     workerNamesArr.length ? JSON.stringify(workerNamesArr) : null,
     workers.length ? JSON.stringify(workers) : null,
+    trailerCount,
     id
   ).run()
 
@@ -386,6 +390,7 @@ api.get('/analytics/daily', authMiddleware, async (c) => {
              SUM(doma_qty) as doma_qty, SUM(civil_qty) as civil_qty,
              SUM(wooden_qty) as wooden_qty, SUM(other_qty) as other_qty,
              SUM(total_qty) as total_qty,
+             SUM(COALESCE(trailer_count, 0)) as trailer_count,
              GROUP_CONCAT(worker_names, '|||') as worker_names_grouped
              FROM processing_records WHERE 1=1`
   const params: any[] = []
@@ -427,6 +432,7 @@ api.get('/analytics/monthly', authMiddleware, async (c) => {
              SUM(doma_qty) as doma_qty, SUM(civil_qty) as civil_qty,
              SUM(wooden_qty) as wooden_qty, SUM(other_qty) as other_qty,
              SUM(total_qty) as total_qty,
+             SUM(COALESCE(trailer_count, 0)) as trailer_count,
              COUNT(DISTINCT date) as days
              FROM processing_records WHERE 1=1`
   const params: any[] = []
@@ -456,6 +462,7 @@ api.get('/analytics/yearly', authMiddleware, async (c) => {
              SUM(doma_qty) as doma_qty, SUM(civil_qty) as civil_qty,
              SUM(wooden_qty) as wooden_qty, SUM(other_qty) as other_qty,
              SUM(total_qty) as total_qty,
+             SUM(COALESCE(trailer_count, 0)) as trailer_count,
              COUNT(DISTINCT date) as days
              FROM processing_records WHERE 1=1`
   const params: any[] = []
@@ -477,17 +484,20 @@ api.get('/analytics/dashboard', authMiddleware, async (c) => {
   const year = today.slice(0, 4)
 
   const todayRow = await c.env.DB.prepare(`
-    SELECT factory, SUM(total_qty) as qty, SUM(staff_count) as staff
+    SELECT factory, SUM(total_qty) as qty, SUM(staff_count) as staff,
+           SUM(COALESCE(trailer_count, 0)) as trailer_count
     FROM processing_records WHERE date = ? GROUP BY factory
   `).bind(today).all()
 
   const monthRow = await c.env.DB.prepare(`
-    SELECT factory, SUM(total_qty) as qty, SUM(staff_count) as staff, COUNT(DISTINCT date) as days
+    SELECT factory, SUM(total_qty) as qty, SUM(staff_count) as staff, COUNT(DISTINCT date) as days,
+           SUM(COALESCE(trailer_count, 0)) as trailer_count
     FROM processing_records WHERE substr(date,1,7) = ? GROUP BY factory
   `).bind(ym).all()
 
   const yearRow = await c.env.DB.prepare(`
-    SELECT factory, SUM(total_qty) as qty, SUM(staff_count) as staff, COUNT(DISTINCT date) as days
+    SELECT factory, SUM(total_qty) as qty, SUM(staff_count) as staff, COUNT(DISTINCT date) as days,
+           SUM(COALESCE(trailer_count, 0)) as trailer_count
     FROM processing_records WHERE substr(date,1,4) = ? GROUP BY factory
   `).bind(year).all()
 

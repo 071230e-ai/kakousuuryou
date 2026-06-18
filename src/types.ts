@@ -28,6 +28,7 @@ export interface ProcessingRecord {
   other_qty: number
   total_qty: number
   qty_per_person: number
+  trailer_count: number
   note: string | null
   created_by: number | null
   created_at: string
