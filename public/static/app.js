@@ -1241,8 +1241,8 @@ async function renderList() {
     state.dateFrom = ''; state.dateTo = ''; state.yearFilter = ''; state.monthFilter = ''; state.factoryFilter = 'all';
     loadListData();
   });
-  document.getElementById('csvBtn').addEventListener('click', exportListCSV);
-  document.getElementById('pdfBtn').addEventListener('click', exportListPDF);
+  document.getElementById('csvBtn').addEventListener('click', exportListCsvUnified);
+  document.getElementById('pdfBtn').addEventListener('click', () => exportListPdfUnified());
 
   await loadListData();
 }
@@ -1518,11 +1518,10 @@ async function renderDaily() {
       drawPartsPerManDayChart('dailyPartsPerMdChart', partsData);
     }
 
-    document.getElementById('dCsv').onclick = () => {
-      exportCSV('日別分析', data, ['date','factory','staff_count',...PART_KEYS,'total_qty','qty_per_person','trailer_count']);
-      exportPartsPerManDayCSV('日別分析_部位別1人工あたり', partsData);
-    };
-    document.getElementById('dPdf').onclick = () => exportPDF('日別分析レポート', data, 'daily', { partsPerMd: partsData });
+    // 統一エクスポート用キャッシュに保存 (画面と同じデータを保証)
+    _stashDailyCache(data, partsData, { dateFrom, dateTo, factory });
+    document.getElementById('dCsv').onclick = exportDailyCsvUnified;
+    document.getElementById('dPdf').onclick = () => exportDailyPdfUnified();
   };
   document.getElementById('dApply').addEventListener('click', load);
   await load();
@@ -1714,11 +1713,10 @@ async function renderMonthly() {
       drawPartsPerManDayChart('monthlyPartsPerMdChart', partsData);
     }
 
-    document.getElementById('mCsv').onclick = () => {
-      exportCSV('月別分析', data, ['ym','factory','days','staff_count',...PART_KEYS,'total_qty','avg_daily_qty','qty_per_person','trailer_count']);
-      exportPartsPerManDayCSV('月別分析_部位別1人工あたり', partsData);
-    };
-    document.getElementById('mPdf').onclick = () => exportPDF('月別分析レポート', data, 'monthly', { partsPerMd: partsData });
+    // 統一エクスポート用キャッシュに保存 (画面と同じデータを保証)
+    _stashMonthlyCache(data, partsData, { year, factory });
+    document.getElementById('mCsv').onclick = exportMonthlyCsvUnified;
+    document.getElementById('mPdf').onclick = () => exportMonthlyPdfUnified();
   };
   document.getElementById('mApply').addEventListener('click', load);
   await load();
@@ -1947,11 +1945,10 @@ async function renderYearly() {
       drawPartsPerManDayChart('yearlyPartsPerMdChart', partsData);
     }
 
-    document.getElementById('yCsv').onclick = () => {
-      exportCSV('年間分析', data, ['year','factory','days','staff_count',...PART_KEYS,'total_qty','qty_per_person','trailer_count']);
-      exportPartsPerManDayCSV('年間分析_部位別1人工あたり', partsData);
-    };
-    document.getElementById('yPdf').onclick = () => exportPDF('年間分析レポート', data, 'yearly', { partsPerMd: partsData });
+    // 統一エクスポート用キャッシュに保存 (画面と同じデータを保証)
+    _stashYearlyCache(data, monthly, partsData, trendYear, { factory, year: trendYear });
+    document.getElementById('yCsv').onclick = exportYearlyCsvUnified;
+    document.getElementById('yPdf').onclick = () => exportYearlyPdfUnified();
   };
   document.getElementById('yApply').addEventListener('click', load);
   await load();
@@ -2198,8 +2195,8 @@ async function renderWorkers() {
     state.factoryFilter = 'all'; state.workerFilter = '';
     loadWorkerData();
   });
-  document.getElementById('wCsv').addEventListener('click', () => exportWorkerCSV());
-  document.getElementById('wPdf').addEventListener('click', () => exportWorkerPDF());
+  document.getElementById('wCsv').addEventListener('click', () => exportWorkerCsvUnified());
+  document.getElementById('wPdf').addEventListener('click', () => exportWorkerPdfUnified());
 
   await loadWorkerData();
 }
@@ -2267,7 +2264,7 @@ async function loadWorkerData() {
       <table class="data-table">
         <thead>
           <tr>
-            <th>人員名</th><th>参加日数</th><th>人工合計</th><th>総加工数量</th><th>1人工あたり</th><th>1日平均</th>
+            <th>人員名</th><th>参加日数</th><th>人工合計</th><th>総加工数量</th><th>1人工あたり</th>
             <th>本社工場</th><th>第二工場</th>
             ${PART_KEYS.map(k=>`<th class="part-${k.replace('_qty','')}">${PART_LABELS[k]}</th>`).join('')}
           </tr>
@@ -2280,7 +2277,6 @@ async function loadWorkerData() {
               <td>${fmtManDays(d.man_days_total)}</td>
               <td class="font-bold">${fmt.qty(d.total_qty)}</td>
               <td>${safeNum(d.man_days_total)>0?fmt.qty(d.qty_per_man_day):'-'}</td>
-              <td>${fmt.qty(d.avg_daily_qty)}</td>
               <td>${fmt.qty(d.honsha_qty)}</td>
               <td>${fmt.qty(d.dai2_qty)}</td>
               ${PART_KEYS.map(k=>`<td>${fmt.qty(d[k])}</td>`).join('')}
@@ -2552,7 +2548,7 @@ function exportWorkerCSV() {
     honsha_man_days: safeNum(d.honsha_man_days),
     dai2_man_days: safeNum(d.dai2_man_days)
   }));
-  const keys = ['worker_name','days','man_days_total','total_qty','qty_per_man_day','avg_daily_qty','honsha_qty','dai2_qty','honsha_man_days','dai2_man_days', ...PART_KEYS];
+  const keys = ['worker_name','days','man_days_total','total_qty','qty_per_man_day','honsha_qty','dai2_qty','honsha_man_days','dai2_man_days', ...PART_KEYS];
   exportCSV('人員別分析', rows, keys);
 
   // 人員ごとの部位別 1人工あたり加工数量 CSV (long-format, 新計算ルール)
@@ -2604,13 +2600,12 @@ function exportWorkerPDF() {
     doc.setFontSize(11);
     doc.text('Total Quantity Ranking (Top 10)', 14, 28);
     doc.autoTable({
-      head: [['Rank','Worker','Days','ManDays','TotalQty','PerManDay','AvgDaily','Honsha','Dai2']],
+      head: [['Rank','Worker','Days','ManDays','TotalQty','PerManDay','Honsha','Dai2']],
       body: top10.map((d,i) => [
         i+1, d.worker_name, safeNum(d.days),
         fmtManDays(d.man_days_total),
         fmt.qty(d.total_qty).replace(/\s.*/,''),
         safeNum(d.man_days_total) > 0 ? fmt.qty(d.qty_per_man_day).replace(/\s.*/,'') : '-',
-        fmt.qty(d.avg_daily_qty).replace(/\s.*/,''),
         fmt.qty(d.honsha_qty).replace(/\s.*/,''),
         fmt.qty(d.dai2_qty).replace(/\s.*/,'')
       ]),
@@ -2840,6 +2835,1357 @@ async function init() {
       showFatalError(error.message);
     }
   }
+}
+
+// ========== 統一CSV/PDF出力機構 ==========
+// 5画面(加工実績一覧/日別/月別/年間/人員別)のCSV/PDF出力を統一
+
+// 危険文字を除去してファイル名として安全にする
+function _safeFileName(s) {
+  return String(s || '').replace(/[\\/:*?"<>|\x00-\x1F]/g, '_').replace(/\s+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+}
+
+// CSVセルエスケープ: 常にダブルクォート囲みで""" エスケープ
+function _escapeCsv(v) {
+  if (v == null) return '""';
+  const s = String(v);
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
+// 数値→文字列 (CSV用: カンマ区切りなし、単位なし)
+function _csvNum(v, opts = {}) {
+  if (v == null || v === '') return '';
+  const n = Number(v);
+  if (!isFinite(n)) return '';
+  const digits = opts.digits;
+  if (typeof digits === 'number') {
+    return n.toFixed(digits);
+  }
+  // 整数っぽければ整数、そうでなければそのまま (末尾余分0を除去)
+  if (Math.floor(n) === n) return String(n);
+  return String(Math.round(n * 1000) / 1000);
+}
+
+// 数値→表示用 (PDF用: カンマ区切り+単位)
+function _pdfNum(v, opts = {}) {
+  if (v == null || v === '') return opts.blank || '-';
+  const n = Number(v);
+  if (!isFinite(n)) return opts.blank || '-';
+  const digits = opts.digits ?? 0;
+  const unit = opts.unit ? ` ${opts.unit}` : '';
+  return n.toLocaleString('ja-JP', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits
+  }) + unit;
+}
+
+// 現在の絞り込み条件を人間可読な行に整形
+// filters: 各画面から渡されるオブジェクト (未指定='全〜'表示)
+function _formatFilters(filters) {
+  if (!filters) return [];
+  const lines = [];
+  const factoryLabel = (f) => {
+    if (!f || f === 'all') return '全体合算';
+    return f;
+  };
+  if (filters.dateFrom !== undefined || filters.dateTo !== undefined) {
+    const from = filters.dateFrom || '';
+    const to = filters.dateTo || '';
+    if (from || to) {
+      lines.push(`期間: ${from || '(未指定)'} 〜 ${to || '(未指定)'}`);
+    } else {
+      lines.push('期間: 全期間');
+    }
+  }
+  if (filters.year !== undefined) {
+    lines.push(`年: ${filters.year || '全年'}`);
+  }
+  if (filters.month !== undefined) {
+    lines.push(`月: ${filters.month ? filters.month + '月' : '全月'}`);
+  }
+  if (filters.factory !== undefined) {
+    lines.push(`工場: ${factoryLabel(filters.factory)}`);
+  }
+  if (filters.workerName !== undefined) {
+    lines.push(`人員名: ${filters.workerName || '全員'}`);
+  }
+  if (filters.part !== undefined) {
+    lines.push(`部位: ${filters.part || '全部位'}`);
+  }
+  lines.push(`出力日時: ${dayjs().format('YYYY/MM/DD HH:mm')}`);
+  return lines;
+}
+
+// ========== 統一CSV出力 ==========
+// options: { filename, columns:[{key,label,digits?,type?}], rows, filters }
+//   type: 'text'|'number'|'date' (default 'text')
+//   digits: 数値の小数桁 (省略時=整数扱い、小数はそのまま)
+function exportCsvUnified(options) {
+  const { filename, columns, rows, filters, title } = options || {};
+  const dataRows = Array.isArray(rows) ? rows : [];
+  if (!Array.isArray(columns) || columns.length === 0) {
+    console.error('[exportCsvUnified] columns is required');
+    alert('CSV出力に失敗しました: 列定義がありません');
+    return;
+  }
+  if (dataRows.length === 0) {
+    alert('出力対象のデータがありません');
+    return;
+  }
+  try {
+    const lines = [];
+    // タイトル/絞り込み条件をコメントヘッダとして先頭に
+    if (title) lines.push(_escapeCsv(title));
+    const fLines = _formatFilters(filters);
+    fLines.forEach(l => lines.push(_escapeCsv(l)));
+    if (title || fLines.length > 0) lines.push(''); // 空行
+    // 見出し
+    lines.push(columns.map(c => _escapeCsv(c.label || c.key)).join(','));
+    // 本体
+    dataRows.forEach(r => {
+      const cells = columns.map(c => {
+        const v = r ? r[c.key] : '';
+        if (c.type === 'number') return _escapeCsv(_csvNum(v, { digits: c.digits }));
+        return _escapeCsv(v == null ? '' : v);
+      });
+      lines.push(cells.join(','));
+    });
+    const csvText = lines.join('\r\n');
+    const bom = '\uFEFF';
+    const blob = new Blob([bom + csvText], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = _safeFileName(filename || 'export') + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    console.log('[CSV出力] ', {
+      filename: a.download,
+      rows: dataRows.length,
+      columns: columns.length,
+      filters: filters
+    });
+  } catch (e) {
+    console.error('[exportCsvUnified] エラー', e);
+    alert('CSV出力に失敗しました: ' + (e.message || '不明なエラー'));
+  }
+}
+
+// ========== 日本語PDFフォントローダ ==========
+// 真のTrueType形式(IPAゴシック)を同一オリジンからロードし、jsPDFに登録
+// - CORS問題なし・CFF/OTFエラーなし・オフライン動作可
+// 一度ロードしたらbase64を再利用 (jsPDFインスタンスごとにaddFontは必須)
+
+let _pdfFontLoadPromise = null;
+const PDF_FONT_NAME = 'NotoSansJP';
+// ローカルバンドル済みTTF (真のTrueType形式、IPAゴシック相当)
+// 同一オリジン配信のため CORS 不要、ブラウザキャッシュ有効
+const PDF_FONT_URLS = [
+  '/static/fonts/NotoSansJP-Regular.ttf'
+];
+
+// ArrayBuffer → Base64 変換
+function _arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000; // 32KB chunks
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
+}
+
+async function _loadPdfJapaneseFont(doc) {
+  // 各PDFインスタンスごとにVFS登録は必要だが、fetch済みbase64は再利用
+  if (!_pdfFontLoadPromise) {
+    _pdfFontLoadPromise = (async () => {
+      let lastErr = null;
+      for (const url of PDF_FONT_URLS) {
+        try {
+          console.log('[PDF font] fetching', url);
+          const res = await fetch(url, { cache: 'force-cache' });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const buf = await res.arrayBuffer();
+          if (buf.byteLength < 10000) throw new Error('font too small: ' + buf.byteLength);
+          // マジックバイト確認: 00 01 00 00 が真のTrueType, 4F 54 54 4F はOTF(非対応)
+          const magic = new Uint8Array(buf.slice(0, 4));
+          const isTrueTTF = magic[0] === 0x00 && magic[1] === 0x01 && magic[2] === 0x00 && magic[3] === 0x00;
+          if (!isTrueTTF) {
+            console.warn('[PDF font] not a TrueType file, magic=', Array.from(magic).map(b=>b.toString(16).padStart(2,'0')).join(' '));
+          }
+          const base64 = _arrayBufferToBase64(buf);
+          console.log('[PDF font] fetched', url, 'size=', buf.byteLength, 'bytes, isTrueTTF=', isTrueTTF);
+          return { base64, url };
+        } catch (e) {
+          lastErr = e;
+          console.warn('[PDF font] failed', url, e.message);
+        }
+      }
+      throw lastErr || new Error('全てのフォントURLで取得失敗');
+    })();
+  }
+  try {
+    const { base64, url } = await _pdfFontLoadPromise;
+    // jsPDFに登録 (VFS→addFont→setFont)
+    const fname = 'NotoSansJP-Regular.ttf';
+    doc.addFileToVFS(fname, base64);
+    doc.addFont(fname, PDF_FONT_NAME, 'normal');
+    doc.setFont(PDF_FONT_NAME, 'normal');
+    return true;
+  } catch (e) {
+    console.error('[PDF font] load failed', e);
+    _pdfFontLoadPromise = null; // 次回リトライ可能に
+    throw e;
+  }
+}
+
+// ========== 統一PDF出力 ==========
+// options: {
+//   title, subtitle, filename, filters,
+//   sections: [{ heading, columns, rows, columnStyles }],  // 複数表を1PDFに
+//   orientation: 'landscape'|'portrait'|'a3-landscape'
+//   summary: [{label, value}]  タイトル直下のサマリカード相当
+// }
+async function exportPdfUnified(options) {
+  const {
+    title, subtitle, filename, filters,
+    sections = [], orientation = 'landscape',
+    summary = []
+  } = options || {};
+
+  if (!window.jspdf || !window.jspdf.jsPDF) {
+    alert('PDFライブラリの読込に失敗しました (jsPDF)');
+    console.error('[exportPdfUnified] jsPDF未読込');
+    return;
+  }
+  const { jsPDF } = window.jspdf;
+  // 有効データチェック: 少なくとも1セクションに1行以上あるか
+  const totalRows = sections.reduce((s, sec) => s + (Array.isArray(sec.rows) ? sec.rows.length : 0), 0);
+  if (totalRows === 0) {
+    alert('出力対象のデータがありません');
+    return;
+  }
+
+  const isA3 = orientation === 'a3-landscape' || orientation === 'a3';
+  const isPortrait = orientation === 'portrait';
+  const doc = new jsPDF({
+    orientation: isPortrait ? 'portrait' : 'landscape',
+    unit: 'mm',
+    format: isA3 ? 'a3' : 'a4'
+  });
+
+  // 日本語フォント読込 (失敗時はエラー表示して中断)
+  try {
+    await _loadPdfJapaneseFont(doc);
+  } catch (e) {
+    alert('PDF用日本語フォントの読み込みに失敗しました。ネットワーク環境をご確認の上、再度お試しください。\n\n' + (e.message || e));
+    console.error('[exportPdfUnified] font load failed', e);
+    return;
+  }
+
+  if (!doc.autoTable) {
+    alert('PDFテーブル拡張の読込に失敗しました (jspdf-autotable)');
+    console.error('[exportPdfUnified] autoTable未読込');
+    return;
+  }
+
+  try {
+    const pageW = doc.internal.pageSize.getWidth();
+    const marginL = 8; // 左右余白を8mmに縮小 (仕様通り)
+    let cursorY = 12;
+
+    // タイトル
+    doc.setFont(PDF_FONT_NAME, 'normal');
+    doc.setFontSize(14);
+    doc.text(title || 'レポート', marginL, cursorY);
+    cursorY += 6;
+    if (subtitle) {
+      doc.setFontSize(10);
+      doc.text(subtitle, marginL, cursorY);
+      cursorY += 5;
+    }
+
+    // 絞り込み条件行
+    doc.setFontSize(9);
+    const fLines = _formatFilters(filters);
+    fLines.forEach(l => {
+      doc.text(l, marginL, cursorY);
+      cursorY += 4.2;
+    });
+    cursorY += 1;
+
+    // サマリ (集計カード相当)
+    if (summary && summary.length > 0) {
+      doc.setFontSize(10);
+      doc.setFont(PDF_FONT_NAME, 'normal');
+      // 4列で並べる
+      const cols = Math.min(4, summary.length);
+      const cardW = (pageW - marginL * 2 - (cols - 1) * 3) / cols;
+      const cardH = 14;
+      for (let i = 0; i < summary.length; i++) {
+        const row = Math.floor(i / cols);
+        const col = i % cols;
+        const x = marginL + col * (cardW + 3);
+        const y = cursorY + row * (cardH + 2);
+        doc.setDrawColor(200);
+        doc.setFillColor(245, 247, 250);
+        doc.roundedRect(x, y, cardW, cardH, 1.5, 1.5, 'FD');
+        doc.setFontSize(8);
+        doc.setTextColor(80);
+        doc.text(String(summary[i].label || ''), x + 2, y + 4);
+        doc.setFontSize(11);
+        doc.setTextColor(20);
+        doc.text(String(summary[i].value || '-'), x + 2, y + 10);
+      }
+      const rowsCount = Math.ceil(summary.length / cols);
+      cursorY += rowsCount * (cardH + 2) + 2;
+      doc.setTextColor(0);
+    }
+
+    // セクション毎に autoTable
+    for (let si = 0; si < sections.length; si++) {
+      const sec = sections[si];
+      const rows = Array.isArray(sec.rows) ? sec.rows : [];
+      if (rows.length === 0 && sec.skipIfEmpty !== false) continue;
+
+      if (sec.heading) {
+        if (cursorY > doc.internal.pageSize.getHeight() - 40) {
+          doc.addPage();
+          cursorY = 12;
+        }
+        doc.setFontSize(11);
+        doc.setFont(PDF_FONT_NAME, 'normal');
+        doc.text(sec.heading, marginL, cursorY);
+        cursorY += 3;
+      }
+
+      const cols = sec.columns || [];
+      const head = [cols.map(c => c.label || c.key)];
+      const body = rows.map(r => cols.map(c => {
+        const v = r ? r[c.key] : '';
+        if (c.pdfRender) return c.pdfRender(v, r);
+        if (c.type === 'number') {
+          return _pdfNum(v, { digits: c.digits ?? 0, unit: c.unit || '' });
+        }
+        return v == null ? '' : String(v);
+      }));
+
+      // 列スタイル自動: type==='number' は右揃え・数値以外は左揃え・見出しは中央揃え(headStylesで指定済)
+      const columnStyles = {};
+      const availableW = pageW - marginL * 2;
+      // 指定合計幅を計算し、pageWを超える場合は比例縮小
+      let totalSpecW = 0;
+      cols.forEach(c => { totalSpecW += (c.width || 0); });
+      const scale = (totalSpecW > 0 && totalSpecW > availableW) ? (availableW / totalSpecW) : 1;
+      cols.forEach((c, i) => {
+        columnStyles[i] = { halign: c.type === 'number' ? 'right' : 'left' };
+        if (c.width) columnStyles[i].cellWidth = Math.max(6, Math.floor(c.width * scale * 10) / 10);
+        if (c.style) Object.assign(columnStyles[i], c.style);
+      });
+      if (sec.columnStyles) Object.assign(columnStyles, sec.columnStyles);
+
+      doc.autoTable({
+        head,
+        body,
+        startY: cursorY + 1,
+        theme: 'grid',
+        tableWidth: 'auto',
+        styles: {
+          font: PDF_FONT_NAME,
+          fontStyle: 'normal',
+          fontSize: sec.fontSize || 7,
+          cellPadding: 1.2,
+          overflow: 'linebreak',
+          valign: 'middle',
+          lineColor: [180, 180, 180],
+          lineWidth: 0.1,
+          minCellWidth: 6
+        },
+        headStyles: {
+          font: PDF_FONT_NAME,
+          fontStyle: 'normal',
+          fontSize: sec.fontSize || 7,
+          fillColor: sec.headColor || [37, 99, 235],
+          textColor: 255,
+          halign: 'center',
+          valign: 'middle',
+          overflow: 'linebreak'
+        },
+        bodyStyles: {
+          font: PDF_FONT_NAME,
+          fontStyle: 'normal'
+        },
+        columnStyles,
+        showHead: 'everyPage',
+        pageBreak: 'auto',
+        rowPageBreak: 'avoid',
+        margin: { left: marginL, right: marginL }
+      });
+      cursorY = (doc.lastAutoTable && doc.lastAutoTable.finalY ? doc.lastAutoTable.finalY : cursorY) + 4;
+    }
+
+    // ページ番号 (全ページ) + 用紙情報 (左下)
+    const pageCount = doc.internal.getNumberOfPages();
+    const paperLabel = (isA3 ? 'A3' : 'A4') + '/' + (isPortrait ? '縦' : '横');
+    for (let p = 1; p <= pageCount; p++) {
+      doc.setPage(p);
+      doc.setFont(PDF_FONT_NAME, 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(120);
+      const pw = doc.internal.pageSize.getWidth();
+      const ph = doc.internal.pageSize.getHeight();
+      doc.text(`${p} / ${pageCount}`, pw - marginL, ph - 5, { align: 'right' });
+      doc.text(paperLabel, marginL, ph - 5);
+      doc.setTextColor(0);
+    }
+
+    doc.save(_safeFileName(filename || 'export') + '.pdf');
+    console.log('[PDF出力]', {
+      filename: _safeFileName(filename || 'export') + '.pdf',
+      sections: sections.length,
+      totalRows,
+      filters
+    });
+  } catch (e) {
+    console.error('[exportPdfUnified] エラー', e);
+    alert('PDF出力に失敗しました: ' + (e.message || '不明なエラー'));
+  }
+}
+
+// ========== 5画面固有のエクスポートハンドラ (統一版) ==========
+
+// 現在の絞り込み条件を state から収集 (list画面のフィルターUIから)
+function _collectListFilters() {
+  return {
+    dateFrom: state.dateFrom || '',
+    dateTo: state.dateTo || '',
+    year: state.yearFilter || '',
+    month: state.monthFilter || '',
+    factory: state.factoryFilter || 'all'
+  };
+}
+
+// -- 加工実績一覧 --
+function exportListCsvUnified() {
+  const records = Array.isArray(state.records) ? state.records : [];
+  const filters = _collectListFilters();
+  console.log('[加工実績一覧 CSV] 画面表示件数=', records.length, ' filters=', filters);
+  const rows = records.map(r => {
+    const wlist = normalizeWorkersClient(r.workers, r.worker_names);
+    return {
+      date: r.date || '',
+      factory: r.factory || '',
+      staff_count: safeNum(r.staff_count),
+      worker_names: wlist.map(w => w.name).join('、'),
+      workers: wlist.map(w => `${w.name}（${fmtManDays(w.man_days)}）`).join('、'),
+      foundation_qty: safeNum(r.foundation_qty),
+      base_qty: safeNum(r.base_qty),
+      column_qty: safeNum(r.column_qty),
+      beam_qty: safeNum(r.beam_qty),
+      fukashi_qty: safeNum(r.fukashi_qty),
+      slab_qty: safeNum(r.slab_qty),
+      doma_qty: safeNum(r.doma_qty),
+      civil_qty: safeNum(r.civil_qty),
+      wooden_qty: safeNum(r.wooden_qty),
+      other_qty: safeNum(r.other_qty),
+      total_qty: safeNum(r.total_qty),
+      qty_per_person: safeNum(r.qty_per_person),
+      trailer_count: safeNum(r.trailer_count),
+      note: r.note || ''
+    };
+  });
+  const columns = [
+    { key: 'date', label: '日付' },
+    { key: 'factory', label: '工場区分' },
+    { key: 'staff_count', label: '人工合計', type: 'number', digits: 3 },
+    { key: 'workers', label: '人員名（人工）' },
+    { key: 'foundation_qty', label: '基礎（kg）', type: 'number' },
+    { key: 'base_qty', label: 'ベース（kg）', type: 'number' },
+    { key: 'column_qty', label: '柱（kg）', type: 'number' },
+    { key: 'beam_qty', label: '梁（kg）', type: 'number' },
+    { key: 'fukashi_qty', label: '壁（kg）', type: 'number' },
+    { key: 'slab_qty', label: 'スラブ（kg）', type: 'number' },
+    { key: 'doma_qty', label: '土間（kg）', type: 'number' },
+    { key: 'civil_qty', label: '土木（kg）', type: 'number' },
+    { key: 'wooden_qty', label: '木造（kg）', type: 'number' },
+    { key: 'other_qty', label: 'その他（kg）', type: 'number' },
+    { key: 'total_qty', label: '総加工数量（kg）', type: 'number' },
+    { key: 'qty_per_person', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 },
+    { key: 'trailer_count', label: 'トレーラー台数（台）', type: 'number' },
+    { key: 'note', label: '備考' }
+  ];
+  const fname = `加工実績一覧_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
+  exportCsvUnified({
+    filename: fname,
+    title: '加工実績一覧',
+    columns, rows, filters
+  });
+}
+
+async function exportListPdfUnified() {
+  const records = Array.isArray(state.records) ? state.records : [];
+  const filters = _collectListFilters();
+  console.log('[加工実績一覧 PDF] 画面表示件数=', records.length, ' filters=', filters);
+  if (records.length === 0) { alert('出力対象のデータがありません'); return; }
+
+  // 共通データ整形
+  const rows = records.map(r => {
+    const wlist = normalizeWorkersClient(r.workers, r.worker_names);
+    return {
+      date: r.date || '',
+      factory: r.factory || '',
+      staff_count: safeNum(r.staff_count),
+      workers: wlist.length ? wlist.map(w => `${w.name}（${fmtManDays(w.man_days)}）`).join('、') : '-',
+      foundation_qty: safeNum(r.foundation_qty),
+      base_qty: safeNum(r.base_qty),
+      column_qty: safeNum(r.column_qty),
+      beam_qty: safeNum(r.beam_qty),
+      fukashi_qty: safeNum(r.fukashi_qty),
+      slab_qty: safeNum(r.slab_qty),
+      doma_qty: safeNum(r.doma_qty),
+      civil_qty: safeNum(r.civil_qty),
+      wooden_qty: safeNum(r.wooden_qty),
+      other_qty: safeNum(r.other_qty),
+      total_qty: safeNum(r.total_qty),
+      qty_per_person: safeNum(r.qty_per_person),
+      trailer_count: safeNum(r.trailer_count),
+      note: r.note || ''
+    };
+  });
+
+  // 表1: 基本情報 (A3横向き=420mm、余白8+8=16mm、有効幅≈404mm)
+  const table1Cols = [
+    { key: 'date', label: '日付', width: 26 },
+    { key: 'factory', label: '工場', width: 26 },
+    { key: 'staff_count', label: '人工計', type: 'number', digits: 3, width: 22 },
+    { key: 'workers', label: '人員（人工）', width: 120 },
+    { key: 'total_qty', label: '総加工量(kg)', type: 'number', width: 30 },
+    { key: 'qty_per_person', label: '1人工あたり', type: 'number', digits: 1, width: 30 },
+    { key: 'trailer_count', label: 'ﾄﾚｰﾗｰ(台)', type: 'number', width: 24 },
+    { key: 'note', label: '備考', width: 120 }
+  ];
+  // 表2: 部位別加工数量
+  const table2Cols = [
+    { key: 'date', label: '日付', width: 26 },
+    { key: 'factory', label: '工場', width: 26 },
+    { key: 'foundation_qty', label: '基礎', type: 'number', width: 32 },
+    { key: 'base_qty', label: 'ベース', type: 'number', width: 32 },
+    { key: 'column_qty', label: '柱', type: 'number', width: 32 },
+    { key: 'beam_qty', label: '梁', type: 'number', width: 32 },
+    { key: 'fukashi_qty', label: '壁', type: 'number', width: 32 },
+    { key: 'slab_qty', label: 'スラブ', type: 'number', width: 32 },
+    { key: 'doma_qty', label: '土間', type: 'number', width: 32 },
+    { key: 'civil_qty', label: '土木', type: 'number', width: 32 },
+    { key: 'wooden_qty', label: '木造', type: 'number', width: 32 },
+    { key: 'other_qty', label: 'その他', type: 'number', width: 32 }
+  ];
+
+  const fname = `加工実績一覧_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
+  await exportPdfUnified({
+    title: '加工実績一覧',
+    filename: fname,
+    filters,
+    orientation: 'a3-landscape',
+    sections: [
+      { heading: '表1：基本情報', columns: table1Cols, rows, fontSize: 8 },
+      { heading: '表2：部位別加工数量（kg）', columns: table2Cols, rows, fontSize: 8, headColor: [124, 58, 237] }
+    ]
+  });
+}
+
+// -- 日別分析 --
+// dailyData/dailyPartsPerMd をキャッシュしておく
+let _dailyCache = { data: [], parts: [], filters: {} };
+function _stashDailyCache(data, parts, filters) {
+  _dailyCache = {
+    data: Array.isArray(data) ? data.slice() : [],
+    parts: Array.isArray(parts) ? parts.slice() : [],
+    filters: filters || {}
+  };
+}
+function exportDailyCsvUnified() {
+  const { data, parts, filters } = _dailyCache;
+  console.log('[日別分析 CSV] 画面表示件数=', data.length, ' filters=', filters);
+  if (data.length === 0) { alert('出力対象のデータがありません'); return; }
+  const totalQty = data.reduce((s, r) => s + safeNum(r.total_qty), 0);
+  const totalMd = data.reduce((s, r) => s + safeNum(r.staff_count), 0);
+  const totalTrailer = data.reduce((s, r) => s + safeNum(r.trailer_count), 0);
+
+  // 集計サマリを先頭付きの CSV に (data + サマリ行)
+  // メイン: 日別一覧
+  const columns = [
+    { key: 'date', label: '日付' },
+    { key: 'factory', label: '工場区分' },
+    { key: 'staff_count', label: '人工合計', type: 'number', digits: 3 },
+    { key: 'foundation_qty', label: '基礎（kg）', type: 'number' },
+    { key: 'base_qty', label: 'ベース（kg）', type: 'number' },
+    { key: 'column_qty', label: '柱（kg）', type: 'number' },
+    { key: 'beam_qty', label: '梁（kg）', type: 'number' },
+    { key: 'fukashi_qty', label: '壁（kg）', type: 'number' },
+    { key: 'slab_qty', label: 'スラブ（kg）', type: 'number' },
+    { key: 'doma_qty', label: '土間（kg）', type: 'number' },
+    { key: 'civil_qty', label: '土木（kg）', type: 'number' },
+    { key: 'wooden_qty', label: '木造（kg）', type: 'number' },
+    { key: 'other_qty', label: 'その他（kg）', type: 'number' },
+    { key: 'total_qty', label: '総加工数量（kg）', type: 'number' },
+    { key: 'qty_per_person', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 },
+    { key: 'trailer_count', label: 'トレーラー台数（台）', type: 'number' }
+  ];
+  const rows = data.map(r => ({
+    ...r,
+    staff_count: safeNum(r.staff_count),
+    total_qty: safeNum(r.total_qty),
+    qty_per_person: safeNum(r.qty_per_person),
+    trailer_count: safeNum(r.trailer_count)
+  }));
+
+  // 部位別1人工あたり (別セクション)
+  const partsColumns = [
+    { key: 'part_label', label: '部位' },
+    { key: 'total_qty', label: '部位別総加工数量（kg）', type: 'number' },
+    { key: 'part_man_days', label: '部位別人工数', type: 'number', digits: 3 },
+    { key: 'qty_per_man_day', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 }
+  ];
+  const partsRows = (parts || []).map(p => ({
+    part_label: p.part_label,
+    total_qty: safeNum(p.total_qty),
+    part_man_days: safeNum(p.part_man_days),
+    qty_per_man_day: safeNum(p.qty_per_man_day)
+  }));
+
+  // 集計サマリを1行目に含めるため、rowsに集計行を追加せず、CSV先頭のtitle以下にfilterで表示 + 追加サマリ列を別途
+  // シンプルにするためメイン一覧のみ / 部位別を別ファイルで
+  const fname = `日別分析_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
+  exportCsvUnified({
+    filename: fname + '_日別一覧',
+    title: `日別分析 - 日別一覧 (集計: 総加工量=${_csvNum(totalQty)}kg / 総人工=${_csvNum(totalMd, {digits:3})} / トレーラー合計=${_csvNum(totalTrailer)}台)`,
+    columns, rows, filters
+  });
+  if (partsRows.length > 0) {
+    exportCsvUnified({
+      filename: fname + '_部位別1人工あたり',
+      title: '日別分析 - 部位別1人工あたり加工数量',
+      columns: partsColumns,
+      rows: partsRows,
+      filters
+    });
+  }
+}
+
+async function exportDailyPdfUnified() {
+  const { data, parts, filters } = _dailyCache;
+  console.log('[日別分析 PDF] 画面表示件数=', data.length, ' filters=', filters);
+  if (data.length === 0) { alert('出力対象のデータがありません'); return; }
+  const totalQty = data.reduce((s, r) => s + safeNum(r.total_qty), 0);
+  const totalMd = data.reduce((s, r) => s + safeNum(r.staff_count), 0);
+  const perMd = totalMd > 0 ? totalQty / totalMd : 0;
+  const totalTrailer = data.reduce((s, r) => s + safeNum(r.trailer_count), 0);
+
+  const rows = data.map(r => ({
+    ...r,
+    staff_count: safeNum(r.staff_count),
+    total_qty: safeNum(r.total_qty),
+    qty_per_person: safeNum(r.qty_per_person),
+    trailer_count: safeNum(r.trailer_count)
+  }));
+
+  // 表1: 日別基本集計 (A4横向きに収まる列数)
+  const table1Cols = [
+    { key: 'date', label: '日付', width: 30 },
+    { key: 'factory', label: '工場', width: 32 },
+    { key: 'staff_count', label: '総人工', type: 'number', digits: 3, width: 26 },
+    { key: 'total_qty', label: '総加工数量(kg)', type: 'number', width: 36 },
+    { key: 'qty_per_person', label: '1人工あたり', type: 'number', digits: 1, width: 34 },
+    { key: 'trailer_count', label: 'ﾄﾚｰﾗｰ台数', type: 'number', width: 28 }
+  ];
+
+  // 表2: 日別部位別数量 (A3横向きが安全)
+  const table2Cols = [
+    { key: 'date', label: '日付', width: 26 },
+    { key: 'factory', label: '工場', width: 28 },
+    { key: 'foundation_qty', label: '基礎', type: 'number', width: 34 },
+    { key: 'base_qty', label: 'ベース', type: 'number', width: 34 },
+    { key: 'column_qty', label: '柱', type: 'number', width: 34 },
+    { key: 'beam_qty', label: '梁', type: 'number', width: 34 },
+    { key: 'fukashi_qty', label: '壁', type: 'number', width: 34 },
+    { key: 'slab_qty', label: 'スラブ', type: 'number', width: 34 },
+    { key: 'doma_qty', label: '土間', type: 'number', width: 34 },
+    { key: 'civil_qty', label: '土木', type: 'number', width: 34 },
+    { key: 'wooden_qty', label: '木造', type: 'number', width: 34 },
+    { key: 'other_qty', label: 'その他', type: 'number', width: 34 }
+  ];
+
+  const sections = [
+    { heading: '表1：日別基本集計', columns: table1Cols, rows, fontSize: 8 },
+    { heading: '表2：日別部位別数量（kg）', columns: table2Cols, rows, fontSize: 8, headColor: [16, 129, 96] }
+  ];
+  if (parts && parts.length > 0) {
+    sections.push({
+      heading: '表3：部位別 1人工あたり加工数量',
+      columns: [
+        { key: 'part_label', label: '部位', width: 40 },
+        { key: 'total_qty', label: '総加工量(kg)', type: 'number', width: 50 },
+        { key: 'part_man_days', label: '部位別人工数', type: 'number', digits: 3, width: 40 },
+        { key: 'qty_per_man_day', label: '1人工あたり(kg/人工)', type: 'number', digits: 1, width: 50 }
+      ],
+      rows: parts.map(p => ({
+        part_label: p.part_label,
+        total_qty: safeNum(p.total_qty),
+        part_man_days: safeNum(p.part_man_days),
+        qty_per_man_day: safeNum(p.qty_per_man_day)
+      })),
+      fontSize: 9,
+      headColor: [124, 58, 237]
+    });
+  }
+
+  const fname = `日別分析_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
+  await exportPdfUnified({
+    title: '日別分析レポート',
+    filename: fname,
+    filters,
+    orientation: 'a3-landscape',
+    summary: [
+      { label: '加工総数量', value: _pdfNum(totalQty, { unit: 'kg' }) },
+      { label: '総人工', value: _pdfNum(totalMd, { digits: 3, unit: '人工' }) },
+      { label: '1人工あたり', value: totalMd > 0 ? _pdfNum(perMd, { digits: 1, unit: 'kg/人工' }) : '-' },
+      { label: 'トレーラー合計', value: _pdfNum(totalTrailer, { unit: '台' }) }
+    ],
+    sections
+  });
+}
+
+// -- 月別分析 --
+let _monthlyCache = { data: [], parts: [], filters: {} };
+function _stashMonthlyCache(data, parts, filters) {
+  _monthlyCache = {
+    data: Array.isArray(data) ? data.slice() : [],
+    parts: Array.isArray(parts) ? parts.slice() : [],
+    filters: filters || {}
+  };
+}
+function exportMonthlyCsvUnified() {
+  const { data, parts, filters } = _monthlyCache;
+  console.log('[月別分析 CSV] 画面表示件数=', data.length, ' filters=', filters);
+  if (data.length === 0) { alert('出力対象のデータがありません'); return; }
+
+  const columns = [
+    { key: 'ym', label: '年月' },
+    { key: 'factory', label: '工場区分' },
+    { key: 'days', label: '稼働日数', type: 'number' },
+    { key: 'staff_count', label: '総人工', type: 'number', digits: 3 },
+    { key: 'foundation_qty', label: '基礎（kg）', type: 'number' },
+    { key: 'base_qty', label: 'ベース（kg）', type: 'number' },
+    { key: 'column_qty', label: '柱（kg）', type: 'number' },
+    { key: 'beam_qty', label: '梁（kg）', type: 'number' },
+    { key: 'fukashi_qty', label: '壁（kg）', type: 'number' },
+    { key: 'slab_qty', label: 'スラブ（kg）', type: 'number' },
+    { key: 'doma_qty', label: '土間（kg）', type: 'number' },
+    { key: 'civil_qty', label: '土木（kg）', type: 'number' },
+    { key: 'wooden_qty', label: '木造（kg）', type: 'number' },
+    { key: 'other_qty', label: 'その他（kg）', type: 'number' },
+    { key: 'total_qty', label: '月間総加工数量（kg）', type: 'number' },
+    { key: 'avg_daily_qty', label: '1日平均（kg）', type: 'number', digits: 1 },
+    { key: 'qty_per_person', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 },
+    { key: 'trailer_count', label: 'トレーラー台数（台）', type: 'number' }
+  ];
+  const rows = data.map(r => ({
+    ym: r.ym,
+    factory: r.factory,
+    days: safeNum(r.days),
+    staff_count: safeNum(r.staff_count),
+    foundation_qty: safeNum(r.foundation_qty),
+    base_qty: safeNum(r.base_qty),
+    column_qty: safeNum(r.column_qty),
+    beam_qty: safeNum(r.beam_qty),
+    fukashi_qty: safeNum(r.fukashi_qty),
+    slab_qty: safeNum(r.slab_qty),
+    doma_qty: safeNum(r.doma_qty),
+    civil_qty: safeNum(r.civil_qty),
+    wooden_qty: safeNum(r.wooden_qty),
+    other_qty: safeNum(r.other_qty),
+    total_qty: safeNum(r.total_qty),
+    avg_daily_qty: safeNum(r.avg_daily_qty),
+    qty_per_person: safeNum(r.qty_per_person),
+    trailer_count: safeNum(r.trailer_count)
+  }));
+
+  const fname = `月別分析_${filters.year || '全年'}年_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
+  exportCsvUnified({
+    filename: fname,
+    title: '月別分析',
+    columns, rows, filters
+  });
+  if (parts && parts.length > 0) {
+    exportCsvUnified({
+      filename: fname + '_部位別1人工あたり',
+      title: '月別分析 - 部位別1人工あたり加工数量',
+      columns: [
+        { key: 'part_label', label: '部位' },
+        { key: 'total_qty', label: '部位別総加工数量（kg）', type: 'number' },
+        { key: 'part_man_days', label: '部位別人工数', type: 'number', digits: 3 },
+        { key: 'qty_per_man_day', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 }
+      ],
+      rows: parts.map(p => ({
+        part_label: p.part_label,
+        total_qty: safeNum(p.total_qty),
+        part_man_days: safeNum(p.part_man_days),
+        qty_per_man_day: safeNum(p.qty_per_man_day)
+      })),
+      filters
+    });
+  }
+}
+
+async function exportMonthlyPdfUnified() {
+  const { data, parts, filters } = _monthlyCache;
+  console.log('[月別分析 PDF] 画面表示件数=', data.length, ' filters=', filters);
+  if (data.length === 0) { alert('出力対象のデータがありません'); return; }
+  const totalQty = data.reduce((s, r) => s + safeNum(r.total_qty), 0);
+  const totalMd = data.reduce((s, r) => s + safeNum(r.staff_count), 0);
+  const totalTrailer = data.reduce((s, r) => s + safeNum(r.trailer_count), 0);
+
+  const rows = data.map(r => ({
+    ym: r.ym,
+    factory: r.factory,
+    days: safeNum(r.days),
+    staff_count: safeNum(r.staff_count),
+    foundation_qty: safeNum(r.foundation_qty),
+    base_qty: safeNum(r.base_qty),
+    column_qty: safeNum(r.column_qty),
+    beam_qty: safeNum(r.beam_qty),
+    fukashi_qty: safeNum(r.fukashi_qty),
+    slab_qty: safeNum(r.slab_qty),
+    doma_qty: safeNum(r.doma_qty),
+    civil_qty: safeNum(r.civil_qty),
+    wooden_qty: safeNum(r.wooden_qty),
+    other_qty: safeNum(r.other_qty),
+    total_qty: safeNum(r.total_qty),
+    avg_daily_qty: safeNum(r.avg_daily_qty),
+    qty_per_person: safeNum(r.qty_per_person),
+    trailer_count: safeNum(r.trailer_count)
+  }));
+
+  // 表1: 基本集計 (A4横向きに収まる)
+  const table1Cols = [
+    { key: 'ym', label: '年月', width: 22 },
+    { key: 'factory', label: '工場', width: 28 },
+    { key: 'days', label: '稼働日', type: 'number', width: 20 },
+    { key: 'staff_count', label: '総人工', type: 'number', digits: 3, width: 22 },
+    { key: 'trailer_count', label: 'ﾄﾚｰﾗｰ台数', type: 'number', width: 24, style: { fillColor: [255, 251, 235] } },
+    { key: 'total_qty', label: '月間合計(kg)', type: 'number', width: 34 },
+    { key: 'avg_daily_qty', label: '1日平均', type: 'number', digits: 1, width: 30 },
+    { key: 'qty_per_person', label: '1人工あたり', type: 'number', digits: 1, width: 32 }
+  ];
+
+  // 表2: 部位別加工数量 (A3横向きが安全)
+  const table2Cols = [
+    { key: 'ym', label: '年月', width: 24 },
+    { key: 'factory', label: '工場', width: 28 },
+    { key: 'foundation_qty', label: '基礎', type: 'number', width: 32 },
+    { key: 'base_qty', label: 'ベース', type: 'number', width: 32 },
+    { key: 'column_qty', label: '柱', type: 'number', width: 32 },
+    { key: 'beam_qty', label: '梁', type: 'number', width: 32 },
+    { key: 'fukashi_qty', label: '壁', type: 'number', width: 32 },
+    { key: 'slab_qty', label: 'スラブ', type: 'number', width: 32 },
+    { key: 'doma_qty', label: '土間', type: 'number', width: 32 },
+    { key: 'civil_qty', label: '土木', type: 'number', width: 32 },
+    { key: 'wooden_qty', label: '木造', type: 'number', width: 32 },
+    { key: 'other_qty', label: 'その他', type: 'number', width: 32 }
+  ];
+
+  const sections = [
+    { heading: '表1：基本集計', columns: table1Cols, rows, fontSize: 8 },
+    { heading: '表2：部位別加工数量（kg）', columns: table2Cols, rows, fontSize: 8, headColor: [16, 129, 96] }
+  ];
+  if (parts && parts.length > 0) {
+    sections.push({
+      heading: '表3：部位別 1人工あたり加工数量',
+      columns: [
+        { key: 'part_label', label: '部位', width: 40 },
+        { key: 'total_qty', label: '総加工量(kg)', type: 'number', width: 50 },
+        { key: 'part_man_days', label: '部位別人工数', type: 'number', digits: 3, width: 40 },
+        { key: 'qty_per_man_day', label: '1人工あたり(kg/人工)', type: 'number', digits: 1, width: 50 }
+      ],
+      rows: parts.map(p => ({
+        part_label: p.part_label,
+        total_qty: safeNum(p.total_qty),
+        part_man_days: safeNum(p.part_man_days),
+        qty_per_man_day: safeNum(p.qty_per_man_day)
+      })),
+      fontSize: 9,
+      headColor: [124, 58, 237]
+    });
+  }
+  const fname = `月別分析_${filters.year || '全年'}年_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
+  await exportPdfUnified({
+    title: '月別分析レポート',
+    filename: fname,
+    filters,
+    orientation: 'a3-landscape',
+    summary: [
+      { label: '総加工数量', value: _pdfNum(totalQty, { unit: 'kg' }) },
+      { label: '総人工', value: _pdfNum(totalMd, { digits: 3, unit: '人工' }) },
+      { label: 'トレーラー合計', value: _pdfNum(totalTrailer, { unit: '台' }) },
+      { label: '対象月数', value: `${data.length} 行` }
+    ],
+    sections
+  });
+}
+
+// -- 年間分析 --
+let _yearlyCache = { data: [], monthly: [], parts: [], trendYear: '', filters: {} };
+function _stashYearlyCache(data, monthly, parts, trendYear, filters) {
+  _yearlyCache = {
+    data: Array.isArray(data) ? data.slice() : [],
+    monthly: Array.isArray(monthly) ? monthly.slice() : [],
+    parts: Array.isArray(parts) ? parts.slice() : [],
+    trendYear: trendYear || '',
+    filters: filters || {}
+  };
+}
+function exportYearlyCsvUnified() {
+  const { data, monthly, parts, trendYear, filters } = _yearlyCache;
+  console.log('[年間分析 CSV] 画面表示件数=', data.length, ' filters=', filters);
+  if (data.length === 0) { alert('出力対象のデータがありません'); return; }
+
+  const yearlyCols = [
+    { key: 'year', label: '年' },
+    { key: 'factory', label: '工場区分' },
+    { key: 'days', label: '稼働日数', type: 'number' },
+    { key: 'staff_count', label: '総人工', type: 'number', digits: 3 },
+    { key: 'foundation_qty', label: '基礎（kg）', type: 'number' },
+    { key: 'base_qty', label: 'ベース（kg）', type: 'number' },
+    { key: 'column_qty', label: '柱（kg）', type: 'number' },
+    { key: 'beam_qty', label: '梁（kg）', type: 'number' },
+    { key: 'fukashi_qty', label: '壁（kg）', type: 'number' },
+    { key: 'slab_qty', label: 'スラブ（kg）', type: 'number' },
+    { key: 'doma_qty', label: '土間（kg）', type: 'number' },
+    { key: 'civil_qty', label: '土木（kg）', type: 'number' },
+    { key: 'wooden_qty', label: '木造（kg）', type: 'number' },
+    { key: 'other_qty', label: 'その他（kg）', type: 'number' },
+    { key: 'total_qty', label: '年間総加工数量（kg）', type: 'number' },
+    { key: 'qty_per_person', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 },
+    { key: 'trailer_count', label: '年間トレーラー台数（台）', type: 'number' }
+  ];
+  const yearlyRows = data.map(r => ({
+    year: r.year,
+    factory: r.factory,
+    days: safeNum(r.days),
+    staff_count: safeNum(r.staff_count),
+    foundation_qty: safeNum(r.foundation_qty),
+    base_qty: safeNum(r.base_qty),
+    column_qty: safeNum(r.column_qty),
+    beam_qty: safeNum(r.beam_qty),
+    fukashi_qty: safeNum(r.fukashi_qty),
+    slab_qty: safeNum(r.slab_qty),
+    doma_qty: safeNum(r.doma_qty),
+    civil_qty: safeNum(r.civil_qty),
+    wooden_qty: safeNum(r.wooden_qty),
+    other_qty: safeNum(r.other_qty),
+    total_qty: safeNum(r.total_qty),
+    qty_per_person: safeNum(r.qty_per_person),
+    trailer_count: safeNum(r.trailer_count)
+  }));
+  const fname = `年間分析_${trendYear || '全年'}年_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
+  exportCsvUnified({
+    filename: fname,
+    title: '年間分析',
+    columns: yearlyCols, rows: yearlyRows, filters
+  });
+
+  // 月別トレーラー台数推移 (別ファイル)
+  if (trendYear && monthly && monthly.length > 0) {
+    const monthlyByYm = {};
+    monthly.forEach(m => {
+      if (!monthlyByYm[m.ym]) monthlyByYm[m.ym] = { total_qty: 0, trailer_count: 0 };
+      monthlyByYm[m.ym].total_qty += safeNum(m.total_qty);
+      monthlyByYm[m.ym].trailer_count += safeNum(m.trailer_count);
+    });
+    const trendRows = Array.from({length: 12}, (_, i) => {
+      const ym = `${trendYear}-${String(i+1).padStart(2, '0')}`;
+      const r = monthlyByYm[ym] || { total_qty: 0, trailer_count: 0 };
+      return {
+        month: `${i+1}月`,
+        total_qty: safeNum(r.total_qty),
+        trailer_count: safeNum(r.trailer_count)
+      };
+    });
+    exportCsvUnified({
+      filename: fname + '_月別推移',
+      title: `年間分析 - ${trendYear}年 月別トレーラー台数・加工量推移`,
+      columns: [
+        { key: 'month', label: '月' },
+        { key: 'total_qty', label: '月間加工量（kg）', type: 'number' },
+        { key: 'trailer_count', label: 'トレーラー台数（台）', type: 'number' }
+      ],
+      rows: trendRows,
+      filters
+    });
+  }
+  if (parts && parts.length > 0) {
+    exportCsvUnified({
+      filename: fname + '_部位別1人工あたり',
+      title: '年間分析 - 部位別1人工あたり加工数量',
+      columns: [
+        { key: 'part_label', label: '部位' },
+        { key: 'total_qty', label: '部位別総加工数量（kg）', type: 'number' },
+        { key: 'part_man_days', label: '部位別人工数', type: 'number', digits: 3 },
+        { key: 'qty_per_man_day', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 }
+      ],
+      rows: parts.map(p => ({
+        part_label: p.part_label,
+        total_qty: safeNum(p.total_qty),
+        part_man_days: safeNum(p.part_man_days),
+        qty_per_man_day: safeNum(p.qty_per_man_day)
+      })),
+      filters
+    });
+  }
+}
+
+async function exportYearlyPdfUnified() {
+  const { data, monthly, parts, trendYear, filters } = _yearlyCache;
+  console.log('[年間分析 PDF] 画面表示件数=', data.length, ' filters=', filters);
+  if (data.length === 0) { alert('出力対象のデータがありません'); return; }
+  const totalQty = data.reduce((s, r) => s + safeNum(r.total_qty), 0);
+  const totalMd = data.reduce((s, r) => s + safeNum(r.staff_count), 0);
+  const totalTrailer = data.reduce((s, r) => s + safeNum(r.trailer_count), 0);
+
+  const rows = data.map(r => ({
+    year: r.year,
+    factory: r.factory,
+    days: safeNum(r.days),
+    staff_count: safeNum(r.staff_count),
+    foundation_qty: safeNum(r.foundation_qty),
+    base_qty: safeNum(r.base_qty),
+    column_qty: safeNum(r.column_qty),
+    beam_qty: safeNum(r.beam_qty),
+    fukashi_qty: safeNum(r.fukashi_qty),
+    slab_qty: safeNum(r.slab_qty),
+    doma_qty: safeNum(r.doma_qty),
+    civil_qty: safeNum(r.civil_qty),
+    wooden_qty: safeNum(r.wooden_qty),
+    other_qty: safeNum(r.other_qty),
+    total_qty: safeNum(r.total_qty),
+    qty_per_person: safeNum(r.qty_per_person),
+    trailer_count: safeNum(r.trailer_count)
+  }));
+
+  // 表1: 年間基本集計
+  const table1Cols = [
+    { key: 'year', label: '年', width: 22 },
+    { key: 'factory', label: '工場', width: 30 },
+    { key: 'days', label: '稼働日', type: 'number', width: 22 },
+    { key: 'staff_count', label: '総人工', type: 'number', digits: 3, width: 26 },
+    { key: 'total_qty', label: '年間合計(kg)', type: 'number', width: 38 },
+    { key: 'qty_per_person', label: '1人工あたり', type: 'number', digits: 1, width: 34 },
+    { key: 'trailer_count', label: '年間ﾄﾚｰﾗｰ台数', type: 'number', width: 34, style: { fillColor: [255, 251, 235] } }
+  ];
+
+  // 表2: 年間部位別加工数量
+  const table2Cols = [
+    { key: 'year', label: '年', width: 22 },
+    { key: 'factory', label: '工場', width: 28 },
+    { key: 'foundation_qty', label: '基礎', type: 'number', width: 32 },
+    { key: 'base_qty', label: 'ベース', type: 'number', width: 32 },
+    { key: 'column_qty', label: '柱', type: 'number', width: 32 },
+    { key: 'beam_qty', label: '梁', type: 'number', width: 32 },
+    { key: 'fukashi_qty', label: '壁', type: 'number', width: 32 },
+    { key: 'slab_qty', label: 'スラブ', type: 'number', width: 32 },
+    { key: 'doma_qty', label: '土間', type: 'number', width: 32 },
+    { key: 'civil_qty', label: '土木', type: 'number', width: 32 },
+    { key: 'wooden_qty', label: '木造', type: 'number', width: 32 },
+    { key: 'other_qty', label: 'その他', type: 'number', width: 32 }
+  ];
+
+  const sections = [
+    { heading: '表1：年間基本集計', columns: table1Cols, rows, fontSize: 9 },
+    { heading: '表2：年間部位別加工数量（kg）', columns: table2Cols, rows, fontSize: 9, headColor: [16, 129, 96] }
+  ];
+
+  // 表3: 月別推移
+  if (trendYear && monthly && monthly.length > 0) {
+    const monthlyByYm = {};
+    monthly.forEach(m => {
+      if (!monthlyByYm[m.ym]) monthlyByYm[m.ym] = { total_qty: 0, staff_count: 0, trailer_count: 0 };
+      monthlyByYm[m.ym].total_qty += safeNum(m.total_qty);
+      monthlyByYm[m.ym].staff_count += safeNum(m.staff_count);
+      monthlyByYm[m.ym].trailer_count += safeNum(m.trailer_count);
+    });
+    const trendRows = Array.from({length: 12}, (_, i) => {
+      const ym = `${trendYear}-${String(i+1).padStart(2, '0')}`;
+      const r = monthlyByYm[ym] || { total_qty: 0, staff_count: 0, trailer_count: 0 };
+      const perMd = r.staff_count > 0 ? r.total_qty / r.staff_count : 0;
+      return {
+        month: `${i+1}月`,
+        total_qty: safeNum(r.total_qty),
+        staff_count: safeNum(r.staff_count),
+        qty_per_person: perMd,
+        trailer_count: safeNum(r.trailer_count)
+      };
+    });
+    sections.push({
+      heading: `表3：${trendYear}年 月別推移`,
+      columns: [
+        { key: 'month', label: '月', width: 30 },
+        { key: 'total_qty', label: '加工数量(kg)', type: 'number', width: 60 },
+        { key: 'staff_count', label: '総人工', type: 'number', digits: 3, width: 50 },
+        { key: 'qty_per_person', label: '1人工あたり', type: 'number', digits: 1, width: 50 },
+        { key: 'trailer_count', label: 'ﾄﾚｰﾗｰ台数', type: 'number', width: 50 }
+      ],
+      rows: trendRows,
+      fontSize: 9,
+      headColor: [217, 119, 6]
+    });
+  }
+
+  if (parts && parts.length > 0) {
+    sections.push({
+      heading: '表4：部位別 1人工あたり加工数量（年間累計）',
+      columns: [
+        { key: 'part_label', label: '部位', width: 40 },
+        { key: 'total_qty', label: '総加工量(kg)', type: 'number', width: 50 },
+        { key: 'part_man_days', label: '部位別人工数', type: 'number', digits: 3, width: 40 },
+        { key: 'qty_per_man_day', label: '1人工あたり(kg/人工)', type: 'number', digits: 1, width: 50 }
+      ],
+      rows: parts.map(p => ({
+        part_label: p.part_label,
+        total_qty: safeNum(p.total_qty),
+        part_man_days: safeNum(p.part_man_days),
+        qty_per_man_day: safeNum(p.qty_per_man_day)
+      })),
+      fontSize: 9,
+      headColor: [124, 58, 237]
+    });
+  }
+
+  const fname = `年間分析_${trendYear || '全年'}年_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
+  await exportPdfUnified({
+    title: '年間分析レポート',
+    filename: fname,
+    filters,
+    orientation: 'a3-landscape',
+    summary: [
+      { label: '年間総加工数量', value: _pdfNum(totalQty, { unit: 'kg' }) },
+      { label: '総人工', value: _pdfNum(totalMd, { digits: 3, unit: '人工' }) },
+      { label: '年間トレーラー台数', value: _pdfNum(totalTrailer, { unit: '台' }) },
+      { label: '月別推移対象年', value: trendYear ? `${trendYear}年` : '-' }
+    ],
+    sections
+  });
+}
+
+// -- 人員別分析 --
+// 人員別のCSV/PDF: 画面と同じ _workerDataCache から出力
+function _collectWorkerFilters() {
+  return {
+    dateFrom: state.dateFrom || '',
+    dateTo: state.dateTo || '',
+    year: state.yearFilter || '',
+    month: state.monthFilter || '',
+    factory: state.factoryFilter || 'all',
+    workerName: state.workerFilter || ''
+  };
+}
+function exportWorkerCsvUnified() {
+  const data = Array.isArray(_workerDataCache) ? _workerDataCache : [];
+  const filters = _collectWorkerFilters();
+  console.log('[人員別分析 CSV] 画面表示件数=', data.length, ' filters=', filters);
+  if (data.length === 0) { alert('出力対象のデータがありません'); return; }
+
+  // 主要な人員別サマリ (「1日平均」を含めない)
+  const columns = [
+    { key: 'worker_name', label: '人員名' },
+    { key: 'days', label: '参加日数', type: 'number' },
+    { key: 'man_days_total', label: '人工合計', type: 'number', digits: 3 },
+    { key: 'total_qty', label: '総加工数量（kg）', type: 'number' },
+    { key: 'qty_per_man_day', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 },
+    { key: 'honsha_qty', label: '本社工場（kg）', type: 'number' },
+    { key: 'dai2_qty', label: '第二工場（kg）', type: 'number' },
+    { key: 'foundation_qty', label: '基礎（kg）', type: 'number' },
+    { key: 'base_qty', label: 'ベース（kg）', type: 'number' },
+    { key: 'column_qty', label: '柱（kg）', type: 'number' },
+    { key: 'beam_qty', label: '梁（kg）', type: 'number' },
+    { key: 'fukashi_qty', label: '壁（kg）', type: 'number' },
+    { key: 'slab_qty', label: 'スラブ（kg）', type: 'number' },
+    { key: 'doma_qty', label: '土間（kg）', type: 'number' },
+    { key: 'civil_qty', label: '土木（kg）', type: 'number' },
+    { key: 'wooden_qty', label: '木造（kg）', type: 'number' },
+    { key: 'other_qty', label: 'その他（kg）', type: 'number' }
+  ];
+  const rows = data.map(d => ({
+    worker_name: d.worker_name,
+    days: safeNum(d.days),
+    man_days_total: safeNum(d.man_days_total),
+    total_qty: safeNum(d.total_qty),
+    qty_per_man_day: safeNum(d.man_days_total) > 0 ? safeNum(d.qty_per_man_day) : 0,
+    honsha_qty: safeNum(d.honsha_qty),
+    dai2_qty: safeNum(d.dai2_qty),
+    foundation_qty: safeNum(d.foundation_qty),
+    base_qty: safeNum(d.base_qty),
+    column_qty: safeNum(d.column_qty),
+    beam_qty: safeNum(d.beam_qty),
+    fukashi_qty: safeNum(d.fukashi_qty),
+    slab_qty: safeNum(d.slab_qty),
+    doma_qty: safeNum(d.doma_qty),
+    civil_qty: safeNum(d.civil_qty),
+    wooden_qty: safeNum(d.wooden_qty),
+    other_qty: safeNum(d.other_qty)
+  }));
+  const fname = `人員別分析_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
+  exportCsvUnified({
+    filename: fname,
+    title: '人員別分析',
+    columns, rows, filters
+  });
+
+  // 部位別1人工あたり (long-format)
+  const partsRows = [];
+  data.forEach(d => {
+    PART_KEYS.forEach(k => {
+      const partQty = safeNum(d[k]);
+      const partMd = safeNum(d['partmd_' + k]);
+      if (partQty <= 0 && partMd <= 0) return;
+      const qtyPerMd = partMd > 0 ? partQty / partMd : 0;
+      partsRows.push({
+        worker_name: d.worker_name,
+        part_label: PART_LABELS[k],
+        part_qty: partQty,
+        part_man_days: partMd,
+        qty_per_man_day: qtyPerMd
+      });
+    });
+  });
+  if (partsRows.length > 0) {
+    exportCsvUnified({
+      filename: fname + '_部位別1人工あたり',
+      title: '人員別分析 - 人員×部位別 1人工あたり加工数量',
+      columns: [
+        { key: 'worker_name', label: '人員名' },
+        { key: 'part_label', label: '部位' },
+        { key: 'part_qty', label: '部位別加工数量（kg）', type: 'number' },
+        { key: 'part_man_days', label: '部位別人工数', type: 'number', digits: 3 },
+        { key: 'qty_per_man_day', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 }
+      ],
+      rows: partsRows,
+      filters
+    });
+  }
+}
+
+async function exportWorkerPdfUnified() {
+  const data = Array.isArray(_workerDataCache) ? _workerDataCache : [];
+  const filters = _collectWorkerFilters();
+  console.log('[人員別分析 PDF] 画面表示件数=', data.length, ' filters=', filters);
+  if (data.length === 0) { alert('出力対象のデータがありません'); return; }
+  const totalQty = data.reduce((s, d) => s + safeNum(d.total_qty), 0);
+  const totalMd = data.reduce((s, d) => s + safeNum(d.man_days_total), 0);
+  const perMd = totalMd > 0 ? totalQty / totalMd : 0;
+
+  // 表1: 基本情報 (「1日平均」を含めず、「1人工あたり」を維持)
+  // A3横向き (420mm) - 余白16mm = 有効幅約404mm
+  const table1Cols = [
+    { key: 'worker_name', label: '人員名', width: 46 },
+    { key: 'days', label: '参加日数', type: 'number', width: 32 },
+    { key: 'man_days_total', label: '人工合計', type: 'number', digits: 3, width: 38 },
+    { key: 'total_qty', label: '総加工数量(kg)', type: 'number', width: 50 },
+    { key: 'qty_per_man_day', label: '1人工あたり', type: 'number', digits: 1, width: 46 },
+    { key: 'honsha_qty', label: '本社工場(kg)', type: 'number', width: 46 },
+    { key: 'dai2_qty', label: '第二工場(kg)', type: 'number', width: 46 }
+  ];
+  const table1Rows = data.map(d => ({
+    worker_name: d.worker_name,
+    days: safeNum(d.days),
+    man_days_total: safeNum(d.man_days_total),
+    total_qty: safeNum(d.total_qty),
+    qty_per_man_day: safeNum(d.man_days_total) > 0 ? safeNum(d.qty_per_man_day) : 0,
+    honsha_qty: safeNum(d.honsha_qty),
+    dai2_qty: safeNum(d.dai2_qty)
+  }));
+
+  // 表2: 部位別加工量 (人員名 + 10部位)
+  const table2Cols = [
+    { key: 'worker_name', label: '人員名', width: 46 },
+    { key: 'foundation_qty', label: '基礎', type: 'number', width: 34 },
+    { key: 'base_qty', label: 'ベース', type: 'number', width: 34 },
+    { key: 'column_qty', label: '柱', type: 'number', width: 34 },
+    { key: 'beam_qty', label: '梁', type: 'number', width: 34 },
+    { key: 'fukashi_qty', label: '壁', type: 'number', width: 34 },
+    { key: 'slab_qty', label: 'スラブ', type: 'number', width: 34 },
+    { key: 'doma_qty', label: '土間', type: 'number', width: 34 },
+    { key: 'civil_qty', label: '土木', type: 'number', width: 34 },
+    { key: 'wooden_qty', label: '木造', type: 'number', width: 34 },
+    { key: 'other_qty', label: 'その他', type: 'number', width: 34 }
+  ];
+  const table2Rows = data.map(d => ({
+    worker_name: d.worker_name,
+    foundation_qty: safeNum(d.foundation_qty),
+    base_qty: safeNum(d.base_qty),
+    column_qty: safeNum(d.column_qty),
+    beam_qty: safeNum(d.beam_qty),
+    fukashi_qty: safeNum(d.fukashi_qty),
+    slab_qty: safeNum(d.slab_qty),
+    doma_qty: safeNum(d.doma_qty),
+    civil_qty: safeNum(d.civil_qty),
+    wooden_qty: safeNum(d.wooden_qty),
+    other_qty: safeNum(d.other_qty)
+  }));
+
+  // 表3: 人員×部位 1人工あたり (long-format)
+  const partsRows = [];
+  data.forEach(d => {
+    PART_KEYS.forEach(k => {
+      const partQty = safeNum(d[k]);
+      const partMd = safeNum(d['partmd_' + k]);
+      if (partQty <= 0 && partMd <= 0) return;
+      const qtyPerMd = partMd > 0 ? partQty / partMd : 0;
+      partsRows.push({
+        worker_name: d.worker_name,
+        part_label: PART_LABELS[k],
+        part_qty: partQty,
+        part_man_days: partMd,
+        qty_per_man_day: qtyPerMd
+      });
+    });
+  });
+
+  const sections = [
+    { heading: '表1：人員別 基本情報', columns: table1Cols, rows: table1Rows, fontSize: 9 },
+    { heading: '表2：人員別 部位別加工量（kg）', columns: table2Cols, rows: table2Rows, fontSize: 9, headColor: [16, 129, 96] }
+  ];
+  if (partsRows.length > 0) {
+    sections.push({
+      heading: '表3：人員×部位 1人工あたり加工数量',
+      columns: [
+        { key: 'worker_name', label: '人員名', width: 50 },
+        { key: 'part_label', label: '部位', width: 32 },
+        { key: 'part_qty', label: '部位別加工量(kg)', type: 'number', width: 44 },
+        { key: 'part_man_days', label: '部位別人工数', type: 'number', digits: 3, width: 36 },
+        { key: 'qty_per_man_day', label: '1人工あたり(kg/人工)', type: 'number', digits: 1, width: 46 }
+      ],
+      rows: partsRows,
+      fontSize: 8,
+      headColor: [124, 58, 237]
+    });
+  }
+  const fname = `人員別分析_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
+  await exportPdfUnified({
+    title: '人員別分析レポート',
+    filename: fname,
+    filters,
+    orientation: 'a3-landscape',
+    summary: [
+      { label: '登録人員数', value: `${data.length} 人` },
+      { label: '人工合計', value: _pdfNum(totalMd, { digits: 3, unit: '人工' }) },
+      { label: '総加工数量', value: _pdfNum(totalQty, { unit: 'kg' }) },
+      { label: '1人工あたり平均', value: totalMd > 0 ? _pdfNum(perMd, { digits: 1, unit: 'kg/人工' }) : '-' }
+    ],
+    sections
+  });
 }
 
 // 公開: ログイン画面の sampleモードボタンから呼び出す

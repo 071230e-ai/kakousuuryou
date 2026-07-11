@@ -17,6 +17,26 @@ export const renderer = jsxRenderer(({ children }) => {
         <link href="/static/style.css" rel="stylesheet" />
       </head>
       <body class="bg-gray-100 min-h-screen">
+        {/* サンドボックス環境バナー: 本番ドメイン(pages.dev)以外で表示 */}
+        <div id="sandbox-banner" style="display:none" class="bg-yellow-400 text-yellow-900 border-b-2 border-yellow-600 py-2 px-4 text-center text-sm font-semibold shadow-md sticky top-0 z-50">
+          <i class="fas fa-flask mr-2"></i>
+          <span class="font-bold">サンドボックス環境</span>
+          <span class="mx-2">/</span>
+          <span>本番環境からコピーした検証用データです（編集しても本番には反映されません）</span>
+        </div>
+        <script dangerouslySetInnerHTML={{ __html: `
+          (function(){
+            try {
+              var h = location.hostname;
+              // 本番( murata-tekkin-processing.pages.dev )以外はサンドボックス扱い
+              var isProd = /murata-tekkin-processing\\.pages\\.dev$/i.test(h);
+              if (!isProd) {
+                var el = document.getElementById('sandbox-banner');
+                if (el) el.style.display = '';
+              }
+            } catch(e) {}
+          })();
+        ` }}></script>
         {children}
         <script src="/static/app.js"></script>
       </body>

@@ -31,3 +31,7 @@ lerna-debug.log*
 
 # misc
 .DS_Store
+
+# sandbox working artifacts (not for production)
+backups/
+prod_export/
