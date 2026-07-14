@@ -3097,52 +3097,60 @@ async function exportPdfUnified(options) {
     const marginL = 8; // 左右余白を8mmに縮小 (仕様通り)
     let cursorY = 12;
 
-    // タイトル
+    // タイトル — 印刷向け: 純黒で大きめに
     doc.setFont(PDF_FONT_NAME, 'normal');
-    doc.setFontSize(14);
+    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(15);
     doc.text(title || 'レポート', marginL, cursorY);
     cursorY += 6;
     if (subtitle) {
-      doc.setFontSize(10);
+      doc.setFontSize(11);
       doc.text(subtitle, marginL, cursorY);
       cursorY += 5;
     }
 
-    // 絞り込み条件行
-    doc.setFontSize(9);
+    // 絞り込み条件行 — 濃いめの色で
+    doc.setFontSize(10);
+    doc.setTextColor(30, 30, 30);
     const fLines = _formatFilters(filters);
     fLines.forEach(l => {
       doc.text(l, marginL, cursorY);
-      cursorY += 4.2;
+      cursorY += 4.4;
     });
     cursorY += 1;
+    doc.setTextColor(0, 0, 0);
 
-    // サマリ (集計カード相当)
+    // サマリ (集計カード相当) — 印刷向け: 値は純黒・拡大表示
     if (summary && summary.length > 0) {
       doc.setFontSize(10);
       doc.setFont(PDF_FONT_NAME, 'normal');
       // 4列で並べる
       const cols = Math.min(4, summary.length);
       const cardW = (pageW - marginL * 2 - (cols - 1) * 3) / cols;
-      const cardH = 14;
+      const cardH = 16; // 値のフォント拡大に合わせて少し高く
       for (let i = 0; i < summary.length; i++) {
         const row = Math.floor(i / cols);
         const col = i % cols;
         const x = marginL + col * (cardW + 3);
         const y = cursorY + row * (cardH + 2);
-        doc.setDrawColor(200);
-        doc.setFillColor(245, 247, 250);
+        // カード枠と背景は少し濃いめに(印刷時の可読性)
+        doc.setDrawColor(100, 100, 100);
+        doc.setLineWidth(0.25);
+        doc.setFillColor(240, 244, 250);
         doc.roundedRect(x, y, cardW, cardH, 1.5, 1.5, 'FD');
-        doc.setFontSize(8);
-        doc.setTextColor(80);
-        doc.text(String(summary[i].label || ''), x + 2, y + 4);
-        doc.setFontSize(11);
-        doc.setTextColor(20);
-        doc.text(String(summary[i].value || '-'), x + 2, y + 10);
+        // ラベル: やや濃いグレー(印刷可能な濃度)
+        doc.setFontSize(9);
+        doc.setTextColor(50, 50, 50);
+        doc.text(String(summary[i].label || ''), x + 2.5, y + 5);
+        // 値: 純黒・大きめ(印刷時に最も見える箇所)
+        doc.setFontSize(13);
+        doc.setTextColor(0, 0, 0);
+        doc.text(String(summary[i].value || '-'), x + 2.5, y + 12);
       }
       const rowsCount = Math.ceil(summary.length / cols);
       cursorY += rowsCount * (cardH + 2) + 2;
-      doc.setTextColor(0);
+      doc.setTextColor(0, 0, 0);
+      doc.setLineWidth(0.2); // リセット
     }
 
     // セクション毎に autoTable
@@ -3156,8 +3164,9 @@ async function exportPdfUnified(options) {
           doc.addPage();
           cursorY = 12;
         }
-        doc.setFontSize(11);
+        doc.setFontSize(12); // 11→12 セクション見出しを目立たせる
         doc.setFont(PDF_FONT_NAME, 'normal');
+        doc.setTextColor(0, 0, 0);
         doc.text(sec.heading, marginL, cursorY);
         cursorY += 3;
       }
@@ -3173,7 +3182,17 @@ async function exportPdfUnified(options) {
         return v == null ? '' : String(v);
       }));
 
-      // 列スタイル自動: type==='number' は右揃え・数値以外は左揃え・見出しは中央揃え(headStylesで指定済)
+      // 列スタイル自動:
+      //  - type==='number' は右揃え + 純黒
+      //  - 数値以外は左揃え + 純黒
+      //  - 見出しは中央揃え(headStylesで指定済)
+      //  - 重要列(合計/1人工あたり/トレーラー/1日平均等)は薄い黄色背景でハイライト
+      // 注意: 日本語フォント(NotoSansJP)は 'normal' しか登録していないため
+      //       fontStyle:'bold' は指定しない(指定すると豆腐化する)。
+      //       代わりに textColor=純黒 + 背景色ハイライト + fontSize=8 で
+      //       「太字相当の視認性」を確保する。
+      const HIGHLIGHT_FILL = [255, 249, 219]; // 薄い黄色: 合計・重要指標
+      const isImportantKey = (k) => /^(total_qty|qty_per_person|qty_per_man_day|trailer_count|avg_daily_qty|monthly_total|yearly_total|grand_total)$/.test(String(k || ''));
       const columnStyles = {};
       const availableW = pageW - marginL * 2;
       // 指定合計幅を計算し、pageWを超える場合は比例縮小
@@ -3181,8 +3200,17 @@ async function exportPdfUnified(options) {
       cols.forEach(c => { totalSpecW += (c.width || 0); });
       const scale = (totalSpecW > 0 && totalSpecW > availableW) ? (availableW / totalSpecW) : 1;
       cols.forEach((c, i) => {
-        columnStyles[i] = { halign: c.type === 'number' ? 'right' : 'left' };
+        const isNum = c.type === 'number';
+        columnStyles[i] = {
+          halign: isNum ? 'right' : 'left',
+          textColor: [0, 0, 0] // 印刷向け: 全セル純黒
+        };
         if (c.width) columnStyles[i].cellWidth = Math.max(6, Math.floor(c.width * scale * 10) / 10);
+        // 重要列は薄い黄色背景で強調(太字の代替)
+        if (isImportantKey(c.key)) {
+          columnStyles[i].fillColor = HIGHLIGHT_FILL;
+        }
+        // 列独自スタイルを最後に適用(呼び出し側の指定を優先)
         if (c.style) Object.assign(columnStyles[i], c.style);
       });
       if (sec.columnStyles) Object.assign(columnStyles, sec.columnStyles);
@@ -3196,50 +3224,63 @@ async function exportPdfUnified(options) {
         styles: {
           font: PDF_FONT_NAME,
           fontStyle: 'normal',
-          fontSize: sec.fontSize || 7,
-          cellPadding: 1.2,
+          fontSize: sec.fontSize || 8, // 印刷向け: デフォルト7→8にUP
+          cellPadding: 1.5,             // 少し余白を広く
           overflow: 'linebreak',
           valign: 'middle',
-          lineColor: [180, 180, 180],
-          lineWidth: 0.1,
+          textColor: [0, 0, 0],         // 本文は純黒
+          lineColor: [80, 80, 80],      // 罫線を濃く(180→80)
+          lineWidth: 0.2,               // 罫線を太く(0.1→0.2)
           minCellWidth: 6
         },
         headStyles: {
           font: PDF_FONT_NAME,
-          fontStyle: 'normal',
-          fontSize: sec.fontSize || 7,
+          fontStyle: 'normal',           // 日本語フォントboldなし
+          fontSize: sec.fontSize || 8,
           fillColor: sec.headColor || [37, 99, 235],
-          textColor: 255,
+          textColor: [255, 255, 255],    // 濃青地に白抜き(印刷ハイコントラスト)
           halign: 'center',
           valign: 'middle',
-          overflow: 'linebreak'
+          overflow: 'linebreak',
+          lineColor: [30, 60, 160],      // ヘッダー枠も濃く
+          lineWidth: 0.3
         },
         bodyStyles: {
           font: PDF_FONT_NAME,
-          fontStyle: 'normal'
+          fontStyle: 'normal',
+          textColor: [0, 0, 0]           // 本文は必ず純黒
+        },
+        alternateRowStyles: {
+          fillColor: [249, 250, 252]     // 縞模様は極薄グレー(印刷しても数字が消えない濃度)
         },
         columnStyles,
         showHead: 'everyPage',
         pageBreak: 'auto',
         rowPageBreak: 'avoid',
-        margin: { left: marginL, right: marginL }
+        margin: { left: marginL, right: marginL },
+        // 保険: 各セルの文字色を確実に純黒に(ライブラリのデフォルト上書き対策)
+        didParseCell: function (data) {
+          if (data.section === 'body') {
+            data.cell.styles.textColor = data.cell.styles.textColor || [0, 0, 0];
+          }
+        }
       });
       cursorY = (doc.lastAutoTable && doc.lastAutoTable.finalY ? doc.lastAutoTable.finalY : cursorY) + 4;
     }
 
-    // ページ番号 (全ページ) + 用紙情報 (左下)
+    // ページ番号 (全ページ) + 用紙情報 (左下) — 印刷向け: 濃いグレー
     const pageCount = doc.internal.getNumberOfPages();
     const paperLabel = (isA3 ? 'A3' : 'A4') + '/' + (isPortrait ? '縦' : '横');
     for (let p = 1; p <= pageCount; p++) {
       doc.setPage(p);
       doc.setFont(PDF_FONT_NAME, 'normal');
-      doc.setFontSize(8);
-      doc.setTextColor(120);
+      doc.setFontSize(9);            // 8→9 少し大きく
+      doc.setTextColor(60, 60, 60);  // 120→60 印刷可能な濃度
       const pw = doc.internal.pageSize.getWidth();
       const ph = doc.internal.pageSize.getHeight();
       doc.text(`${p} / ${pageCount}`, pw - marginL, ph - 5, { align: 'right' });
       doc.text(paperLabel, marginL, ph - 5);
-      doc.setTextColor(0);
+      doc.setTextColor(0, 0, 0);
     }
 
     doc.save(_safeFileName(filename || 'export') + '.pdf');
