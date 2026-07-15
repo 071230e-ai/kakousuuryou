@@ -3263,6 +3263,16 @@ async function exportPdfUnified(options) {
           if (data.section === 'body') {
             data.cell.styles.textColor = data.cell.styles.textColor || [0, 0, 0];
           }
+          // セクション側で didParseCell が指定されていれば追加で呼び出す
+          if (typeof sec.didParseCell === 'function') {
+            try { sec.didParseCell(data, cols); } catch (_) {}
+          }
+        },
+        // データバー等のセル背景装飾を許容(セクション側で任意指定)
+        didDrawCell: function (data) {
+          if (typeof sec.didDrawCell === 'function') {
+            try { sec.didDrawCell(data, cols, doc); } catch (_) {}
+          }
         }
       });
       cursorY = (doc.lastAutoTable && doc.lastAutoTable.finalY ? doc.lastAutoTable.finalY : cursorY) + 4;
@@ -3743,22 +3753,78 @@ async function exportMonthlyPdfUnified() {
     { heading: '表2：部位別加工数量（kg）', columns: table2Cols, rows, fontSize: 8, headColor: [16, 129, 96] }
   ];
   if (parts && parts.length > 0) {
-    sections.push({
-      heading: '表3：部位別 1人工あたり加工数量',
-      columns: [
-        { key: 'part_label', label: '部位', width: 40 },
-        { key: 'total_qty', label: '総加工量(kg)', type: 'number', width: 50 },
-        { key: 'part_man_days', label: '部位別人工数', type: 'number', digits: 3, width: 40 },
-        { key: 'qty_per_man_day', label: '1人工あたり(kg/人工)', type: 'number', digits: 1, width: 50 }
-      ],
-      rows: parts.map(p => ({
+    // 構成比 = 各部位の総加工量 ÷ レポート全体の総加工量 × 100
+    // 全体の総加工量は既存の totalQty(= data.total_qty 合計) を再利用(再集計しない)
+    // 0kg時はゼロ除算を避けて 0.0% とする
+    const grandForShare = safeNum(totalQty);
+    const partRows = parts.map(p => {
+      const q = safeNum(p.total_qty);
+      const share = grandForShare > 0 ? (q / grandForShare * 100) : 0;
+      return {
         part_label: p.part_label,
-        total_qty: safeNum(p.total_qty),
+        total_qty: q,
+        share_pct: share,
         part_man_days: safeNum(p.part_man_days),
         qty_per_man_day: safeNum(p.qty_per_man_day)
-      })),
+      };
+    });
+    // 構成比の最大値(データバー描画のスケール用)
+    const maxShare = partRows.reduce((m, r) => Math.max(m, safeNum(r.share_pct)), 0);
+    // 構成比列のインデックス(下記 columns の位置と一致させる)
+    const SHARE_COL_INDEX = 2;
+
+    sections.push({
+      heading: '表3：部位別 1人工あたり加工数量（構成比つき）',
+      columns: [
+        { key: 'part_label', label: '部位', width: 34 },
+        { key: 'total_qty', label: '総加工量(kg)', type: 'number', width: 46 },
+        {
+          key: 'share_pct',
+          label: '構成比(%)',
+          type: 'number',
+          width: 46,
+          // 表示は 29.7% のように % 付き小数第1位
+          pdfRender: (v) => {
+            const n = safeNum(v);
+            return n.toFixed(1) + '%';
+          }
+        },
+        { key: 'part_man_days', label: '部位別人工数', type: 'number', digits: 3, width: 42 },
+        { key: 'qty_per_man_day', label: '1人工あたり(kg/人工)', type: 'number', digits: 1, width: 50 }
+      ],
+      rows: partRows,
       fontSize: 9,
-      headColor: [124, 58, 237]
+      headColor: [124, 58, 237],
+      // 構成比列を薄い黄色で強調(重要指標のため)
+      columnStyles: {
+        [SHARE_COL_INDEX]: {
+          halign: 'right',
+          textColor: [0, 0, 0],
+          fillColor: [255, 249, 219],
+          cellPadding: { top: 1.5, right: 4, bottom: 1.5, left: 1.5 }
+        }
+      },
+      // データバー: 構成比セルの下端に薄いバーを描画(数値は必ず読める)
+      didDrawCell: function (data, colDefs, doc) {
+        if (data.section !== 'body') return;
+        if (data.column.index !== SHARE_COL_INDEX) return;
+        const rowIdx = data.row.index;
+        if (rowIdx < 0 || rowIdx >= partRows.length) return;
+        const v = safeNum(partRows[rowIdx].share_pct);
+        if (!(v > 0) || !(maxShare > 0)) return;
+        const ratio = Math.min(1, v / maxShare);
+        // セル全体を覆わず、セル下部に細めのバーを重ねる
+        const cell = data.cell;
+        const barPad = 1.2;
+        const barX = cell.x + barPad;
+        const barY = cell.y + cell.height - 1.7;
+        const barMaxW = Math.max(0, cell.width - barPad * 2);
+        const barW = barMaxW * ratio;
+        const barH = 0.9;
+        // 薄い紫(ヘッダー色に合わせる)
+        doc.setFillColor(196, 181, 253);
+        doc.rect(barX, barY, barW, barH, 'F');
+      }
     });
   }
   const fname = `月別分析_${filters.year || '全年'}年_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
