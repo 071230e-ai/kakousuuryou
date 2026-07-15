@@ -3263,16 +3263,6 @@ async function exportPdfUnified(options) {
           if (data.section === 'body') {
             data.cell.styles.textColor = data.cell.styles.textColor || [0, 0, 0];
           }
-          // セクション側で didParseCell が指定されていれば追加で呼び出す
-          if (typeof sec.didParseCell === 'function') {
-            try { sec.didParseCell(data, cols); } catch (_) {}
-          }
-        },
-        // データバー等のセル背景装飾を許容(セクション側で任意指定)
-        didDrawCell: function (data) {
-          if (typeof sec.didDrawCell === 'function') {
-            try { sec.didDrawCell(data, cols, doc); } catch (_) {}
-          }
         }
       });
       cursorY = (doc.lastAutoTable && doc.lastAutoTable.finalY ? doc.lastAutoTable.finalY : cursorY) + 4;
@@ -3748,14 +3738,62 @@ async function exportMonthlyPdfUnified() {
     { key: 'other_qty', label: 'その他', type: 'number', width: 32 }
   ];
 
+  // 表3(新): 月別・部位別構成比(%) — 各月の月間合計を分母に、既存 rows データから算出
+  // 分母は「その月の月間合計 = total_qty」であり、レポート全期間の totalQty ではない。
+  // 各部位の構成比 = その月の各部位加工数量 ÷ その月の総加工数量 × 100
+  // 月間合計が 0 の場合はゼロ除算を避けて全部位 0.0%、合計列も 0.0% とする。
+  // 月間合計 > 0 の場合、合計列は表示値の単純和ではなく必ず 100.0% を表示する
+  // (小数第1位への丸め差で 99.9% や 100.1% になっても、合計列は 100.0% 固定)。
+  const partKeys = [
+    ['foundation_qty', '基礎'],
+    ['base_qty',       'ベース'],
+    ['column_qty',     '柱'],
+    ['beam_qty',       '梁'],
+    ['fukashi_qty',    '壁'],
+    ['slab_qty',       'スラブ'],
+    ['doma_qty',       '土間'],
+    ['civil_qty',      '土木'],
+    ['wooden_qty',     '木造'],
+    ['other_qty',      'その他']
+  ];
+  const monthlyShareRows = rows.map(r => {
+    const mTotal = safeNum(r.total_qty);
+    const o = { ym: r.ym, factory: r.factory };
+    partKeys.forEach(([k]) => {
+      o[k + '_pct'] = mTotal > 0 ? (safeNum(r[k]) / mTotal * 100) : 0;
+    });
+    // 合計列: 月間合計>0なら常に100.0%、0なら0.0%
+    o.total_pct = mTotal > 0 ? 100 : 0;
+    return o;
+  });
+  const table3Cols = [
+    { key: 'ym',      label: '年月', width: 22 },
+    { key: 'factory', label: '工場', width: 26 },
+    ...partKeys.map(([k, label]) => ({
+      key: k + '_pct',
+      label,
+      type: 'number',
+      width: 26,
+      pdfRender: (v) => safeNum(v).toFixed(1) + '%'
+    })),
+    {
+      key: 'total_pct',
+      label: '合計',
+      type: 'number',
+      width: 26,
+      pdfRender: (v) => safeNum(v).toFixed(1) + '%'
+    }
+  ];
+
   const sections = [
     { heading: '表1：基本集計', columns: table1Cols, rows, fontSize: 8 },
-    { heading: '表2：部位別加工数量（kg）', columns: table2Cols, rows, fontSize: 8, headColor: [16, 129, 96] }
+    { heading: '表2：部位別加工数量（kg）', columns: table2Cols, rows, fontSize: 8, headColor: [16, 129, 96] },
+    { heading: '表3：月別・部位別構成比（%）', columns: table3Cols, rows: monthlyShareRows, fontSize: 8, headColor: [217, 119, 6] }
   ];
   if (parts && parts.length > 0) {
-    // 構成比 = 各部位の総加工量 ÷ レポート全体の総加工量 × 100
-    // 全体の総加工量は既存の totalQty(= data.total_qty 合計) を再利用(再集計しない)
-    // 0kg時はゼロ除算を避けて 0.0% とする
+    // 表4: 部位別 1人工あたり加工数量 (レポート全期間の総加工量を分母とする構成比を含む)
+    // 分母 = レポート全期間の総加工量 (既存 totalQty を再利用、再集計しない)
+    // 月別構成比(表3)とは分母が異なるため混同しないこと
     const grandForShare = safeNum(totalQty);
     const partRows = parts.map(p => {
       const q = safeNum(p.total_qty);
@@ -3768,63 +3806,25 @@ async function exportMonthlyPdfUnified() {
         qty_per_man_day: safeNum(p.qty_per_man_day)
       };
     });
-    // 構成比の最大値(データバー描画のスケール用)
-    const maxShare = partRows.reduce((m, r) => Math.max(m, safeNum(r.share_pct)), 0);
-    // 構成比列のインデックス(下記 columns の位置と一致させる)
-    const SHARE_COL_INDEX = 2;
-
     sections.push({
-      heading: '表3：部位別 1人工あたり加工数量（構成比つき）',
+      heading: '表4：部位別 1人工あたり加工数量',
       columns: [
-        { key: 'part_label', label: '部位', width: 34 },
-        { key: 'total_qty', label: '総加工量(kg)', type: 'number', width: 46 },
+        { key: 'part_label',      label: '部位',                width: 34 },
+        { key: 'total_qty',       label: '総加工量(kg)',        type: 'number', width: 42 },
         {
           key: 'share_pct',
           label: '構成比(%)',
           type: 'number',
-          width: 46,
-          // 表示は 29.7% のように % 付き小数第1位
-          pdfRender: (v) => {
-            const n = safeNum(v);
-            return n.toFixed(1) + '%';
-          }
+          width: 30,
+          // 数値のみ表示(棒グラフ・背景色なし、他の数値列と同一スタイル)
+          pdfRender: (v) => safeNum(v).toFixed(1) + '%'
         },
-        { key: 'part_man_days', label: '部位別人工数', type: 'number', digits: 3, width: 42 },
+        { key: 'part_man_days',   label: '部位別人工数',        type: 'number', digits: 3, width: 42 },
         { key: 'qty_per_man_day', label: '1人工あたり(kg/人工)', type: 'number', digits: 1, width: 50 }
       ],
       rows: partRows,
       fontSize: 9,
-      headColor: [124, 58, 237],
-      // 構成比列を薄い黄色で強調(重要指標のため)
-      columnStyles: {
-        [SHARE_COL_INDEX]: {
-          halign: 'right',
-          textColor: [0, 0, 0],
-          fillColor: [255, 249, 219],
-          cellPadding: { top: 1.5, right: 4, bottom: 1.5, left: 1.5 }
-        }
-      },
-      // データバー: 構成比セルの下端に薄いバーを描画(数値は必ず読める)
-      didDrawCell: function (data, colDefs, doc) {
-        if (data.section !== 'body') return;
-        if (data.column.index !== SHARE_COL_INDEX) return;
-        const rowIdx = data.row.index;
-        if (rowIdx < 0 || rowIdx >= partRows.length) return;
-        const v = safeNum(partRows[rowIdx].share_pct);
-        if (!(v > 0) || !(maxShare > 0)) return;
-        const ratio = Math.min(1, v / maxShare);
-        // セル全体を覆わず、セル下部に細めのバーを重ねる
-        const cell = data.cell;
-        const barPad = 1.2;
-        const barX = cell.x + barPad;
-        const barY = cell.y + cell.height - 1.7;
-        const barMaxW = Math.max(0, cell.width - barPad * 2);
-        const barW = barMaxW * ratio;
-        const barH = 0.9;
-        // 薄い紫(ヘッダー色に合わせる)
-        doc.setFillColor(196, 181, 253);
-        doc.rect(barX, barY, barW, barH, 'F');
-      }
+      headColor: [124, 58, 237]
     });
   }
   const fname = `月別分析_${filters.year || '全年'}年_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
