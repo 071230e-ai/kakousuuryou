@@ -577,9 +577,9 @@ function renderLayout() {
           ${navBtn('yearly','calendar','年間分析')}
           ${navBtn('workers','users','人員別分析')}
           <span class="hidden md:inline-block border-l border-gray-300 mx-1"></span>
-          ${navBtn('transport-input','truck','運搬数量入力')}
-          ${navBtn('transport-list','list','運搬実績一覧')}
-          ${navBtn('transport-analysis','chart-line','運搬数量分析')}
+          ${navBtn('transport-input','truck','積込・運搬数量入力')}
+          ${navBtn('transport-list','list','積込・運搬実績一覧')}
+          ${navBtn('transport-analysis','chart-line','積込・運搬数量分析')}
         </nav>
       </header>
       <main id="main" class="flex-1 max-w-7xl w-full mx-auto p-4"></main>
@@ -4417,7 +4417,7 @@ function renderTransportInput(record = null) {
   main.innerHTML = `
     <div class="max-w-3xl mx-auto">
       <h2 class="text-xl font-bold text-gray-800 mb-4">
-        <i class="fas fa-truck mr-2"></i>${isEdit ? '運搬実績の編集' : '運搬数量入力'}
+        <i class="fas fa-truck mr-2"></i>${isEdit ? '積込・運搬実績の編集' : '積込・運搬数量入力'}
       </h2>
       <form id="transportForm" class="bg-white rounded-xl shadow-sm p-6 space-y-5">
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -4437,13 +4437,13 @@ function renderTransportInput(record = null) {
         <div class="bg-indigo-50 border border-indigo-200 p-4 rounded-lg">
           <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
             <h3 class="font-semibold text-indigo-900">
-              <i class="fas fa-users mr-1"></i>運搬人員・人工 <span id="tr_workerCount" class="text-xs font-normal text-gray-600 ml-1"></span>
+              <i class="fas fa-users mr-1"></i>積込・運搬人員・人工 <span id="tr_workerCount" class="text-xs font-normal text-gray-600 ml-1"></span>
             </h3>
             <button type="button" id="tr_addWorkerBtn" class="btn-secondary text-sm">
               <i class="fas fa-plus mr-1"></i>人員を追加
             </button>
           </div>
-          <p class="text-xs text-gray-600 mb-2">運搬人員と人工を入力してください。人工は 0 より大きい数値・小数第3位まで（1人工＝7時間）。合計人工が下に自動表示されます。</p>
+          <p class="text-xs text-gray-600 mb-2">積込・運搬人員と人工を入力してください。人工は 0 より大きい数値・小数第3位まで（1人工＝7時間）。合計人工が下に自動表示されます。</p>
           <div id="tr_workerList" class="space-y-2"></div>
           <div class="mt-3 text-right">
             <span class="text-sm text-gray-600 mr-2">合計人工</span>
@@ -4453,13 +4453,13 @@ function renderTransportInput(record = null) {
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">運搬車両 <span class="text-red-500">*</span></label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">積込・運搬車両 <span class="text-red-500">*</span></label>
             <input id="tr_vehicle" type="text" required maxlength="100" value="${escapeHtml(r.vehicle || '')}" placeholder="例: 10t車、8tユニック、京都100あ12-34" class="input-base" list="tr_vehicleList" />
             <datalist id="tr_vehicleList"></datalist>
             <p class="text-xs text-gray-500 mt-1">車両区分は自由入力です（100文字以内）</p>
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">運搬数量 <span class="text-red-500">*</span></label>
+            <label class="block text-sm font-medium text-gray-700 mb-1">積込・運搬数量 <span class="text-red-500">*</span></label>
             <div class="flex items-center gap-2">
               <input id="tr_qty" type="number" required min="0.001" step="0.001" value="${(r.transport_quantity_kg === 0 || r.transport_quantity_kg) ? r.transport_quantity_kg : ''}" placeholder="例: 12500" class="input-num flex-1" inputmode="decimal" />
               <span class="text-gray-700 font-medium">kg</span>
@@ -4505,7 +4505,7 @@ function renderTransportInput(record = null) {
       list.innerHTML = workers.map((w, i) => `
         <div class="flex flex-col sm:flex-row gap-2 sm:items-center bg-white p-2 rounded border border-indigo-100">
           <div class="flex-1">
-            <label class="text-xs text-gray-500 sm:hidden">運搬人員</label>
+            <label class="text-xs text-gray-500 sm:hidden">積込・運搬人員</label>
             <input type="text" data-tr-worker-name="${i}" value="${escapeHtml(w.worker_name || '')}" placeholder="人員名" class="input-base w-full" list="tr_workerMasterList" />
           </div>
           <div class="w-full sm:w-32">
@@ -4594,24 +4594,24 @@ function renderTransportInput(record = null) {
     // クライアント側バリデーション (サーバ側でも同様に検証)
     if (!date) return showTrErr(errEl, '日付を入力してください');
     if (!factory) return showTrErr(errEl, '工場の別を選択してください');
-    if (!vehicle) return showTrErr(errEl, '運搬車両を入力してください');
-    if (vehicle.length > 100) return showTrErr(errEl, '運搬車両は100文字以内で入力してください');
-    if (qtyRaw === '' || qtyRaw == null) return showTrErr(errEl, '運搬数量を入力してください');
+    if (!vehicle) return showTrErr(errEl, '積込・運搬車両を入力してください');
+    if (vehicle.length > 100) return showTrErr(errEl, '積込・運搬車両は100文字以内で入力してください');
+    if (qtyRaw === '' || qtyRaw == null) return showTrErr(errEl, '積込・運搬数量を入力してください');
     const qtyNum = Number(qtyRaw);
-    if (!isFinite(qtyNum) || qtyNum <= 0) return showTrErr(errEl, '運搬数量は0より大きい数値を指定してください');
+    if (!isFinite(qtyNum) || qtyNum <= 0) return showTrErr(errEl, '積込・運搬数量は0より大きい数値を指定してください');
     // 運搬数量は小数第3位まで保持 (DB REAL)。第4位以降は四捨五入する。
     const qty = Math.round(qtyNum * 1000) / 1000;
 
     const validWorkers = workers
       .map(w => ({ worker_name: String(w.worker_name || '').trim(), man_days: w.man_days === '' ? null : Number(w.man_days) }))
       .filter(w => w.worker_name);
-    if (validWorkers.length === 0) return showTrErr(errEl, '運搬人員を1名以上入力してください');
+    if (validWorkers.length === 0) return showTrErr(errEl, '積込・運搬人員を1名以上入力してください');
     const nameSet = new Set();
     for (const w of validWorkers) {
-      if (nameSet.has(w.worker_name)) return showTrErr(errEl, `同一の運搬人員 "${w.worker_name}" が重複しています`);
+      if (nameSet.has(w.worker_name)) return showTrErr(errEl, `同一の積込・運搬人員 "${w.worker_name}" が重複しています`);
       nameSet.add(w.worker_name);
-      if (w.man_days == null || !isFinite(w.man_days)) return showTrErr(errEl, `運搬人員 "${w.worker_name}" の人工が未入力です`);
-      if (w.man_days <= 0) return showTrErr(errEl, `運搬人員 "${w.worker_name}" の人工は0より大きい値を指定してください`);
+      if (w.man_days == null || !isFinite(w.man_days)) return showTrErr(errEl, `積込・運搬人員 "${w.worker_name}" の人工が未入力です`);
+      if (w.man_days <= 0) return showTrErr(errEl, `積込・運搬人員 "${w.worker_name}" の人工は0より大きい値を指定してください`);
     }
 
     const submitBtn = document.getElementById('tr_submitBtn');
@@ -4641,7 +4641,7 @@ function renderTransportInput(record = null) {
       }
       // 成功時: サーバから返る最新 updated_at を保持しておく (連続編集対応)
       transportState.editingUpdatedAt = saved.updated_at || null;
-      okEl.innerHTML = `<i class="fas fa-check-circle mr-1"></i>${isEdit ? '更新しました' : '登録しました'} (ID: ${saved.id})　<a class="underline text-blue-600" href="#" id="tr_gotoList">運搬実績一覧を見る</a>`;
+      okEl.innerHTML = `<i class="fas fa-check-circle mr-1"></i>${isEdit ? '更新しました' : '登録しました'} (ID: ${saved.id})　<a class="underline text-blue-600" href="#" id="tr_gotoList">積込・運搬実績一覧を見る</a>`;
       okEl.classList.remove('hidden');
       document.getElementById('tr_gotoList')?.addEventListener('click', (ev) => {
         ev.preventDefault(); navigateTo('transport-list');
@@ -4654,7 +4654,7 @@ function renderTransportInput(record = null) {
       // 楽観ロック競合 (409 + conflict:true) - 他ユーザー/他タブが先に更新した
       if (err.status === 409 && err.data && err.data.conflict === true) {
         submitBtn.disabled = false; submitBtn.innerHTML = orig;
-        const msg = '他のユーザーによりこの運搬記録が更新されています。最新の内容を再読み込みしてから、もう一度編集してください。';
+        const msg = '他のユーザーによりこの積込・運搬記録が更新されています。最新の内容を再読み込みしてから、もう一度編集してください。';
         if (confirm(msg + '\n\n[OK] 最新データを取り直して編集を続ける / [キャンセル] 一覧へ戻る')) {
           try {
             const fresh = await api.getTransport(transportState.editingId);
@@ -4710,7 +4710,7 @@ async function renderTransportList() {
     <div class="space-y-4">
       <div class="flex items-center justify-between flex-wrap gap-2">
         <h2 class="text-xl font-bold text-gray-800">
-          <i class="fas fa-list mr-2"></i>運搬実績一覧
+          <i class="fas fa-list mr-2"></i>積込・運搬実績一覧
         </h2>
         <div class="flex gap-2 flex-wrap">
           <button id="tr_list_csv" class="btn-secondary text-sm"><i class="fas fa-file-csv mr-1"></i>CSV</button>
@@ -4738,11 +4738,11 @@ async function renderTransportList() {
             </select>
           </div>
           <div>
-            <label class="text-xs text-gray-600">運搬人員 (部分一致)</label>
+            <label class="text-xs text-gray-600">積込・運搬人員 (部分一致)</label>
             <input id="tr_f_worker" type="text" value="${escapeHtml(f.worker || '')}" placeholder="例: 山田" class="input-base" />
           </div>
           <div>
-            <label class="text-xs text-gray-600">運搬車両 (部分一致)</label>
+            <label class="text-xs text-gray-600">積込・運搬車両 (部分一致)</label>
             <input id="tr_f_vehicle" type="text" value="${escapeHtml(f.vehicle || '')}" placeholder="例: 10t" class="input-base" />
           </div>
           <div class="flex items-end gap-1">
@@ -4810,11 +4810,11 @@ function renderTrListTable(records) {
 
   sumArea.innerHTML = `
     <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-blue-500">
-      <p class="text-xs text-gray-500">運搬件数</p>
+      <p class="text-xs text-gray-500">積込・運搬件数</p>
       <p class="text-2xl font-bold text-gray-800">${count} 件</p>
     </div>
     <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-green-500">
-      <p class="text-xs text-gray-500">運搬数量合計</p>
+      <p class="text-xs text-gray-500">積込・運搬数量合計</p>
       <p class="text-2xl font-bold text-green-700">${trFmtQty(totalQty)} <span class="text-sm">kg</span></p>
     </div>
     <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-indigo-500">
@@ -4822,13 +4822,13 @@ function renderTrListTable(records) {
       <p class="text-2xl font-bold text-indigo-700">${trFmtMd(totalMd)}</p>
     </div>
     <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-purple-500">
-      <p class="text-xs text-gray-500">1人工当たり運搬数量</p>
+      <p class="text-xs text-gray-500">1人工当たり積込・運搬数量</p>
       <p class="text-2xl font-bold text-purple-700">${totalMd > 0 ? trFmtQty1(perMd) : '－'} <span class="text-sm">kg/人工</span></p>
     </div>
   `;
 
   if (records.length === 0) {
-    area.innerHTML = `<div class="text-center py-10 text-gray-500"><i class="fas fa-inbox text-3xl"></i><p class="mt-2">該当する運搬記録がありません</p></div>`;
+    area.innerHTML = `<div class="text-center py-10 text-gray-500"><i class="fas fa-inbox text-3xl"></i><p class="mt-2">該当する積込・運搬記録がありません</p></div>`;
     return;
   }
 
@@ -4848,10 +4848,10 @@ function renderTrListTable(records) {
           <tr class="text-left">
             <th class="px-2 py-2">日付</th>
             <th class="px-2 py-2">工場</th>
-            <th class="px-2 py-2">運搬人員 (人工)</th>
+            <th class="px-2 py-2">積込・運搬人員 (人工)</th>
             <th class="px-2 py-2 text-right">合計人工</th>
-            <th class="px-2 py-2">運搬車両</th>
-            <th class="px-2 py-2 text-right">運搬数量</th>
+            <th class="px-2 py-2">積込・運搬車両</th>
+            <th class="px-2 py-2 text-right">積込・運搬数量</th>
             <th class="px-2 py-2 text-right">1人工当たり</th>
             <th class="px-2 py-2 text-center">操作</th>
           </tr>
@@ -4915,7 +4915,7 @@ function renderTrListTable(records) {
   area.querySelectorAll('[data-tr-del]').forEach(btn => {
     btn.addEventListener('click', async (e) => {
       const id = Number(e.currentTarget.dataset.trDel);
-      if (!confirm(`運搬記録 ID: ${id} を削除します。よろしいですか？`)) return;
+      if (!confirm(`積込・運搬記録 ID: ${id} を削除します。よろしいですか？`)) return;
       try {
         await api.deleteTransport(id);
         await reloadTrList();
@@ -4939,7 +4939,7 @@ async function renderTransportAnalysis() {
     <div class="space-y-4">
       <div class="flex items-center justify-between flex-wrap gap-2">
         <h2 class="text-xl font-bold text-gray-800">
-          <i class="fas fa-chart-line mr-2"></i>運搬数量分析
+          <i class="fas fa-chart-line mr-2"></i>積込・運搬数量分析
         </h2>
         <div class="flex gap-2">
           <button id="tra_csv" class="btn-secondary text-sm"><i class="fas fa-file-csv mr-1"></i>CSV</button>
@@ -5077,23 +5077,23 @@ function renderTraSummary(el, data) {
   const perMd = totalMd > 0 ? totalQty / totalMd : 0;
   el.innerHTML = `
     <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-green-500">
-      <p class="text-xs text-gray-500">運搬数量</p>
+      <p class="text-xs text-gray-500">積込・運搬数量</p>
       <p class="text-xl font-bold text-green-700">${trFmtQty(totalQty)} <span class="text-sm">kg</span></p>
     </div>
     <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-indigo-500">
-      <p class="text-xs text-gray-500">運搬人工</p>
+      <p class="text-xs text-gray-500">積込・運搬人工</p>
       <p class="text-xl font-bold text-indigo-700">${trFmtMd(totalMd)}</p>
     </div>
     <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-blue-500">
-      <p class="text-xs text-gray-500">運搬件数</p>
+      <p class="text-xs text-gray-500">積込・運搬件数</p>
       <p class="text-xl font-bold text-blue-700">${totalRc}</p>
     </div>
     <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-teal-500">
-      <p class="text-xs text-gray-500">1件当たり運搬数量</p>
+      <p class="text-xs text-gray-500">1件当たり積込・運搬数量</p>
       <p class="text-xl font-bold text-teal-700">${totalRc > 0 ? trFmtQty(perRec) : '－'} <span class="text-sm">kg</span></p>
     </div>
     <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-purple-500">
-      <p class="text-xs text-gray-500">1人工当たり運搬数量</p>
+      <p class="text-xs text-gray-500">1人工当たり積込・運搬数量</p>
       <p class="text-xl font-bold text-purple-700">${totalMd > 0 ? trFmtQty1(perMd) : '－'} <span class="text-sm">kg/人工</span></p>
     </div>
   `;
@@ -5115,9 +5115,9 @@ function renderTraDaily(el, data) {
         <thead class="bg-gray-100">
           <tr class="text-left">
             <th class="px-2 py-2">日付</th>
-            <th class="px-2 py-2 text-right">運搬数量</th>
-            <th class="px-2 py-2 text-right">運搬人工</th>
-            <th class="px-2 py-2 text-right">運搬件数</th>
+            <th class="px-2 py-2 text-right">積込・運搬数量</th>
+            <th class="px-2 py-2 text-right">積込・運搬人工</th>
+            <th class="px-2 py-2 text-right">積込・運搬件数</th>
             <th class="px-2 py-2 text-right">1件当たり</th>
             <th class="px-2 py-2 text-right">1人工当たり</th>
             <th class="px-2 py-2 text-right">本社工場</th>
@@ -5146,14 +5146,14 @@ function renderTraDaily(el, data) {
     data: {
       labels: data.map(r => r.date),
       datasets: [
-        { type:'bar', label:'運搬数量(kg)', data: data.map(r => r.total_qty), backgroundColor:'rgba(16, 185, 129, 0.6)', yAxisID:'y' },
+        { type:'bar', label:'積込・運搬数量(kg)', data: data.map(r => r.total_qty), backgroundColor:'rgba(16, 185, 129, 0.6)', yAxisID:'y' },
         { type:'line', label:'1人工当たり(kg/人工)', data: data.map(r => r.total_man_days > 0 ? r.qty_per_man_day : null), borderColor:'rgb(147, 51, 234)', backgroundColor:'rgba(147, 51, 234, 0.2)', yAxisID:'y1', tension:0.2 }
       ]
     },
     options: {
       responsive:true, maintainAspectRatio:false,
       scales: {
-        y: { position:'left', title:{ display:true, text:'運搬数量(kg)' } },
+        y: { position:'left', title:{ display:true, text:'積込・運搬数量(kg)' } },
         y1:{ position:'right', title:{ display:true, text:'1人工当たり(kg/人工)' }, grid:{ drawOnChartArea:false } }
       }
     }
@@ -5168,7 +5168,7 @@ function renderTraMonthly(el, data) {
   }
   el.innerHTML = `
     <div class="bg-white rounded-xl shadow-sm p-4">
-      <h3 class="font-semibold mb-2">月別運搬数量</h3>
+      <h3 class="font-semibold mb-2">月別積込・運搬数量</h3>
       <div class="relative" style="height:260px"><canvas id="tra_monthly_chart"></canvas></div>
     </div>
     <div class="bg-white rounded-xl shadow-sm p-2 md:p-4 overflow-x-auto">
@@ -5176,9 +5176,9 @@ function renderTraMonthly(el, data) {
         <thead class="bg-gray-100">
           <tr class="text-left">
             <th class="px-2 py-2">月</th>
-            <th class="px-2 py-2 text-right">運搬数量</th>
-            <th class="px-2 py-2 text-right">運搬人工</th>
-            <th class="px-2 py-2 text-right">運搬件数</th>
+            <th class="px-2 py-2 text-right">積込・運搬数量</th>
+            <th class="px-2 py-2 text-right">積込・運搬人工</th>
+            <th class="px-2 py-2 text-right">積込・運搬件数</th>
             <th class="px-2 py-2 text-right">1件当たり</th>
             <th class="px-2 py-2 text-right">1人工当たり</th>
             <th class="px-2 py-2 text-right">本社工場</th>
@@ -5216,7 +5216,7 @@ function renderTraMonthly(el, data) {
     },
     options: {
       responsive:true, maintainAspectRatio:false,
-      scales: { x:{ stacked:true }, y:{ stacked:true, title:{ display:true, text:'運搬数量(kg)' } } }
+      scales: { x:{ stacked:true }, y:{ stacked:true, title:{ display:true, text:'積込・運搬数量(kg)' } } }
     }
   });
 }
@@ -5234,9 +5234,9 @@ function renderTraYearly(el, yearly, monthly) {
         <thead class="bg-gray-100">
           <tr class="text-left">
             <th class="px-2 py-2">年</th>
-            <th class="px-2 py-2 text-right">運搬数量</th>
-            <th class="px-2 py-2 text-right">運搬人工</th>
-            <th class="px-2 py-2 text-right">運搬件数</th>
+            <th class="px-2 py-2 text-right">積込・運搬数量</th>
+            <th class="px-2 py-2 text-right">積込・運搬人工</th>
+            <th class="px-2 py-2 text-right">積込・運搬件数</th>
             <th class="px-2 py-2 text-right">1件当たり</th>
             <th class="px-2 py-2 text-right">1人工当たり</th>
             <th class="px-2 py-2 text-right">本社工場</th>
@@ -5273,16 +5273,16 @@ function renderTraYearly(el, yearly, monthly) {
       data: {
         labels: monthly.map(r => r.ym),
         datasets: [
-          { type:'bar', label:'運搬数量(kg)', data: monthly.map(r => r.total_qty), backgroundColor:'rgba(16, 185, 129, 0.6)', yAxisID:'y' },
-          { type:'line', label:'運搬人工', data: monthly.map(r => r.total_man_days), borderColor:'rgb(59, 130, 246)', backgroundColor:'rgba(59, 130, 246, 0.2)', yAxisID:'y1', tension:0.2 },
+          { type:'bar', label:'積込・運搬数量(kg)', data: monthly.map(r => r.total_qty), backgroundColor:'rgba(16, 185, 129, 0.6)', yAxisID:'y' },
+          { type:'line', label:'積込・運搬人工', data: monthly.map(r => r.total_man_days), borderColor:'rgb(59, 130, 246)', backgroundColor:'rgba(59, 130, 246, 0.2)', yAxisID:'y1', tension:0.2 },
           { type:'line', label:'1人工当たり(kg/人工)', data: monthly.map(r => r.total_man_days > 0 ? r.qty_per_man_day : null), borderColor:'rgb(147, 51, 234)', backgroundColor:'rgba(147, 51, 234, 0.2)', yAxisID:'y2', tension:0.2, borderDash:[5,3] }
         ]
       },
       options: {
         responsive:true, maintainAspectRatio:false,
         scales: {
-          y:  { position:'left',  title:{ display:true, text:'運搬数量(kg)' } },
-          y1: { position:'right', title:{ display:true, text:'運搬人工' }, grid:{ drawOnChartArea:false } },
+          y:  { position:'left',  title:{ display:true, text:'積込・運搬数量(kg)' } },
+          y1: { position:'right', title:{ display:true, text:'積込・運搬人工' }, grid:{ drawOnChartArea:false } },
           y2: { display:false }
         }
       }
@@ -5298,18 +5298,18 @@ function renderTraWorkers(el, data) {
   }
   el.innerHTML = `
     <div class="bg-white rounded-xl shadow-sm p-4">
-      <h3 class="font-semibold mb-2">人員別運搬数量 (Top 20)</h3>
+      <h3 class="font-semibold mb-2">人員別積込・運搬数量 (Top 20)</h3>
       <div class="relative" style="height:280px"><canvas id="tra_workers_chart"></canvas></div>
     </div>
     <div class="bg-white rounded-xl shadow-sm p-2 md:p-4 overflow-x-auto">
       <table class="w-full text-sm">
         <thead class="bg-gray-100">
           <tr class="text-left">
-            <th class="px-2 py-2">運搬人員</th>
+            <th class="px-2 py-2">積込・運搬人員</th>
             <th class="px-2 py-2 text-right">担当人工</th>
             <th class="px-2 py-2 text-right">担当件数</th>
             <th class="px-2 py-2 text-right">担当日数</th>
-            <th class="px-2 py-2 text-right">担当運搬数量</th>
+            <th class="px-2 py-2 text-right">担当積込・運搬数量</th>
             <th class="px-2 py-2 text-right">1人工当たり</th>
             <th class="px-2 py-2 text-right">本社工場</th>
             <th class="px-2 py-2 text-right">第二工場</th>
@@ -5338,9 +5338,9 @@ function renderTraWorkers(el, data) {
     type: 'bar',
     data: {
       labels: top.map(r => r.worker_name),
-      datasets: [{ label:'担当運搬数量(kg)', data: top.map(r => r.total_qty), backgroundColor:'rgba(16, 185, 129, 0.7)' }]
+      datasets: [{ label:'担当積込・運搬数量(kg)', data: top.map(r => r.total_qty), backgroundColor:'rgba(16, 185, 129, 0.7)' }]
     },
-    options: { responsive:true, maintainAspectRatio:false, indexAxis: 'y', scales:{ x:{ title:{ display:true, text:'運搬数量(kg)' } } } }
+    options: { responsive:true, maintainAspectRatio:false, indexAxis: 'y', scales:{ x:{ title:{ display:true, text:'積込・運搬数量(kg)' } } } }
   });
 }
 
@@ -5405,9 +5405,9 @@ function trFilterLabel(params) {
 // ---- CSV: 一覧 ----
 function exportTransportListCsv(records, filters) {
   const rows = [];
-  rows.push([`運搬実績一覧 出力条件`, trFilterLabel(filters)]);
+  rows.push([`積込・運搬実績一覧 出力条件`, trFilterLabel(filters)]);
   rows.push([]);
-  rows.push(['日付','工場','運搬人員(人工)','合計人工','運搬車両','運搬数量(kg)','1人工当たり運搬数量(kg/人工)']);
+  rows.push(['日付','工場','積込・運搬人員(人工)','合計人工','積込・運搬車両','積込・運搬数量(kg)','1人工当たり積込・運搬数量(kg/人工)']);
   let totQty = 0, totMd = 0;
   for (const r of records) {
     const workersStr = (r.workers || []).map(w => `${w.worker_name}(${trFmtMd(w.man_days)})`).join('; ');
@@ -5419,7 +5419,7 @@ function exportTransportListCsv(records, filters) {
   }
   rows.push([]);
   rows.push(['合計','','', trCsvMd(totMd),'', trCsvNum(totQty), totMd > 0 ? trCsvNum(totQty / totMd, 1) : '']);
-  const fn = `運搬実績一覧_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}.csv`;
+  const fn = `積込・運搬実績一覧_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}.csv`;
   trCsvDownload(rows, fn);
 }
 
@@ -5428,9 +5428,9 @@ function exportTransportAnalysisCsv(kind, data, params, monthly) {
   const rows = [];
   const filterStr = trFilterLabel(params);
   if (kind === 'daily') {
-    rows.push(['運搬数量分析(日別) 出力条件', filterStr]);
+    rows.push(['積込・運搬数量分析(日別) 出力条件', filterStr]);
     rows.push([]);
-    rows.push(['日付','運搬数量(kg)','運搬人工','運搬件数','1件当たり運搬数量(kg)','1人工当たり運搬数量(kg/人工)','本社工場運搬数量(kg)','第二工場運搬数量(kg)']);
+    rows.push(['日付','積込・運搬数量(kg)','積込・運搬人工','積込・運搬件数','1件当たり積込・運搬数量(kg)','1人工当たり積込・運搬数量(kg/人工)','本社工場積込・運搬数量(kg)','第二工場積込・運搬数量(kg)']);
     let tq=0, tmd=0, trc=0, thh=0, td2=0;
     for (const r of data) {
       rows.push([r.date, trCsvNum(r.total_qty), trCsvMd(r.total_man_days), r.record_count,
@@ -5446,9 +5446,9 @@ function exportTransportAnalysisCsv(kind, data, params, monthly) {
       tmd > 0 ? trCsvNum(tq / tmd, 1) : '',
       trCsvNum(thh), trCsvNum(td2)]);
   } else if (kind === 'monthly') {
-    rows.push(['運搬数量分析(月別) 出力条件', filterStr]);
+    rows.push(['積込・運搬数量分析(月別) 出力条件', filterStr]);
     rows.push([]);
-    rows.push(['月','運搬数量(kg)','運搬人工','運搬件数','1件当たり運搬数量(kg)','1人工当たり運搬数量(kg/人工)','本社工場運搬数量(kg)','第二工場運搬数量(kg)','前月比増減率(%)']);
+    rows.push(['月','積込・運搬数量(kg)','積込・運搬人工','積込・運搬件数','1件当たり積込・運搬数量(kg)','1人工当たり積込・運搬数量(kg/人工)','本社工場積込・運搬数量(kg)','第二工場積込・運搬数量(kg)','前月比増減率(%)']);
     let tq=0, tmd=0, trc=0, thh=0, td2=0;
     for (const r of data) {
       rows.push([r.ym, trCsvNum(r.total_qty), trCsvMd(r.total_man_days), r.record_count,
@@ -5462,9 +5462,9 @@ function exportTransportAnalysisCsv(kind, data, params, monthly) {
     rows.push([]);
     rows.push(['合計', trCsvNum(tq), trCsvMd(tmd), trc, trc > 0 ? trCsvNum(tq / trc) : '', tmd > 0 ? trCsvNum(tq / tmd, 1) : '', trCsvNum(thh), trCsvNum(td2), '']);
   } else if (kind === 'yearly') {
-    rows.push(['運搬数量分析(年別) 出力条件', filterStr]);
+    rows.push(['積込・運搬数量分析(年別) 出力条件', filterStr]);
     rows.push([]);
-    rows.push(['年','運搬数量(kg)','運搬人工','運搬件数','1件当たり運搬数量(kg)','1人工当たり運搬数量(kg/人工)','本社工場運搬数量(kg)','第二工場運搬数量(kg)','前年比増減率(%)']);
+    rows.push(['年','積込・運搬数量(kg)','積込・運搬人工','積込・運搬件数','1件当たり積込・運搬数量(kg)','1人工当たり積込・運搬数量(kg/人工)','本社工場積込・運搬数量(kg)','第二工場積込・運搬数量(kg)','前年比増減率(%)']);
     for (const r of data) {
       rows.push([r.year, trCsvNum(r.total_qty), trCsvMd(r.total_man_days), r.record_count,
         r.record_count > 0 ? trCsvNum(r.qty_per_record) : '',
@@ -5475,15 +5475,15 @@ function exportTransportAnalysisCsv(kind, data, params, monthly) {
     if (Array.isArray(monthly) && monthly.length > 0) {
       rows.push([]);
       rows.push(['月別推移']);
-      rows.push(['月','運搬数量(kg)','運搬人工','1人工当たり運搬数量(kg/人工)']);
+      rows.push(['月','積込・運搬数量(kg)','積込・運搬人工','1人工当たり積込・運搬数量(kg/人工)']);
       for (const r of monthly) {
         rows.push([r.ym, trCsvNum(r.total_qty), trCsvMd(r.total_man_days), r.total_man_days > 0 ? trCsvNum(r.qty_per_man_day, 1) : '']);
       }
     }
   } else if (kind === 'workers') {
-    rows.push(['運搬数量分析(人員別) 出力条件', filterStr]);
+    rows.push(['積込・運搬数量分析(人員別) 出力条件', filterStr]);
     rows.push([]);
-    rows.push(['運搬人員','担当人工','担当件数','担当日数','担当運搬数量(kg)','1人工当たり運搬数量(kg/人工)','本社工場運搬数量(kg)','第二工場運搬数量(kg)']);
+    rows.push(['積込・運搬人員','担当人工','担当件数','担当日数','担当積込・運搬数量(kg)','1人工当たり積込・運搬数量(kg/人工)','本社工場積込・運搬数量(kg)','第二工場積込・運搬数量(kg)']);
     let tq=0, tmd=0, thh=0, td2=0;
     for (const r of data) {
       rows.push([r.worker_name, trCsvMd(r.total_man_days), r.record_count, r.days, trCsvNum(r.total_qty),
@@ -5496,7 +5496,7 @@ function exportTransportAnalysisCsv(kind, data, params, monthly) {
     rows.push(['合計', trCsvMd(tmd), '', '', trCsvNum(tq), tmd > 0 ? trCsvNum(tq / tmd, 1) : '', trCsvNum(thh), trCsvNum(td2)]);
   }
   const label = ({daily:'日別', monthly:'月別', yearly:'年別', workers:'人員別'})[kind];
-  const fn = `運搬数量分析_${label}_${params.dateFrom || params.year || '全期間'}_${params.factory === 'all' ? '全体合算' : params.factory}.csv`;
+  const fn = `積込・運搬数量分析_${label}_${params.dateFrom || params.year || '全期間'}_${params.factory === 'all' ? '全体合算' : params.factory}.csv`;
   trCsvDownload(rows, fn);
 }
 
@@ -5618,9 +5618,9 @@ function trBuildKpiSummary(data) {
   const totMd = data.reduce((s, r) => s + (Number(r.total_man_days) || 0), 0);
   const totRc = data.reduce((s, r) => s + (Number(r.record_count) || 0), 0);
   return [
-    { label: '運搬数量(kg)',    value: trPdfNum(totQty) },
-    { label: '運搬人工',        value: trPdfNum(totMd, 3) },
-    { label: '運搬件数',        value: String(totRc) },
+    { label: '積込・運搬数量(kg)',    value: trPdfNum(totQty) },
+    { label: '積込・運搬人工',        value: trPdfNum(totMd, 3) },
+    { label: '積込・運搬件数',        value: String(totRc) },
     { label: '1件当たり(kg)',   value: totRc > 0 ? trPdfNum(totQty / totRc) : '－' },
     { label: '1人工当たり(kg/人工)', value: totMd > 0 ? trPdfNum(totQty / totMd, 1) : '－' }
   ];
@@ -5629,12 +5629,12 @@ function trBuildKpiSummary(data) {
 // ---- PDF: 一覧 ----
 async function exportTransportListPdf(records, filters) {
   const doc = await trPdfInit();
-  trPdfHeader(doc, '運搬実績一覧', filters);
+  trPdfHeader(doc, '積込・運搬実績一覧', filters);
   const totQty = records.reduce((s, r) => s + (Number(r.transport_quantity_kg) || 0), 0);
   const totMd = records.reduce((s, r) => s + (Number(r.total_man_days) || 0), 0);
   const summary = [
-    { label: '運搬件数', value: String(records.length) },
-    { label: '運搬数量(kg)', value: trPdfNum(totQty) },
+    { label: '積込・運搬件数', value: String(records.length) },
+    { label: '積込・運搬数量(kg)', value: trPdfNum(totQty) },
     { label: '人工合計', value: trPdfNum(totMd, 3) },
     { label: '1人工当たり(kg/人工)', value: totMd > 0 ? trPdfNum(totQty / totMd, 1) : '－' }
   ];
@@ -5651,7 +5651,7 @@ async function exportTransportListPdf(records, filters) {
   });
   doc.autoTable({
     startY: y,
-    head: [['日付','工場','運搬人員(人工)','合計人工','運搬車両','運搬数量(kg)','1人工当たり(kg/人工)']],
+    head: [['日付','工場','積込・運搬人員(人工)','合計人工','積込・運搬車両','積込・運搬数量(kg)','1人工当たり(kg/人工)']],
     body,
     theme: 'grid',
     styles:     { font: PDF_FONT_NAME, fontStyle: 'normal', fontSize: 8, overflow: 'linebreak', valign: 'middle' },
@@ -5665,7 +5665,7 @@ async function exportTransportListPdf(records, filters) {
     showHead: 'everyPage',
     margin: { left: 40, right: 40 }
   });
-  const fn = `運搬実績一覧_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}.pdf`;
+  const fn = `積込・運搬実績一覧_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}.pdf`;
   doc.save(fn);
 }
 
@@ -5673,12 +5673,12 @@ async function exportTransportListPdf(records, filters) {
 async function exportTransportAnalysisPdf(kind, data, params, monthly) {
   const doc = await trPdfInit();
   const label = ({daily:'日別', monthly:'月別', yearly:'年別', workers:'人員別'})[kind];
-  trPdfHeader(doc, `運搬数量分析（${label}）`, params);
+  trPdfHeader(doc, `積込・運搬数量分析（${label}）`, params);
   const summary = (kind === 'workers')
     ? [
         { label: '登録人員数', value: `${data.length} 人` },
-        { label: '運搬数量(kg)', value: trPdfNum(data.reduce((s,r)=>s+(Number(r.total_qty)||0),0)) },
-        { label: '運搬人工', value: trPdfNum(data.reduce((s,r)=>s+(Number(r.total_man_days)||0),0), 3) },
+        { label: '積込・運搬数量(kg)', value: trPdfNum(data.reduce((s,r)=>s+(Number(r.total_qty)||0),0)) },
+        { label: '積込・運搬人工', value: trPdfNum(data.reduce((s,r)=>s+(Number(r.total_man_days)||0),0), 3) },
         { label: '1人工当たり(kg/人工)', value: (() => { const q = data.reduce((s,r)=>s+(Number(r.total_qty)||0),0); const md = data.reduce((s,r)=>s+(Number(r.total_man_days)||0),0); return md > 0 ? trPdfNum(q/md, 1) : '－'; })() }
       ]
     : trBuildKpiSummary(data);
@@ -5686,7 +5686,7 @@ async function exportTransportAnalysisPdf(kind, data, params, monthly) {
 
   let head, body, colStyles;
   if (kind === 'daily') {
-    head = [['日付','運搬数量(kg)','運搬人工','運搬件数','1件当たり(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)']];
+    head = [['日付','積込・運搬数量(kg)','積込・運搬人工','積込・運搬件数','1件当たり(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)']];
     body = data.map(r => [
       r.date, trPdfNum(r.total_qty), trPdfNum(r.total_man_days, 3), String(r.record_count),
       r.record_count > 0 ? trPdfNum(r.qty_per_record) : '－',
@@ -5695,7 +5695,7 @@ async function exportTransportAnalysisPdf(kind, data, params, monthly) {
     ]);
     colStyles = { 1:{halign:'right'},2:{halign:'right'},3:{halign:'right'},4:{halign:'right'},5:{halign:'right'},6:{halign:'right'},7:{halign:'right'} };
   } else if (kind === 'monthly') {
-    head = [['月','運搬数量(kg)','運搬人工','運搬件数','1件当たり(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)','前月比(増減率)']];
+    head = [['月','積込・運搬数量(kg)','積込・運搬人工','積込・運搬件数','1件当たり(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)','前月比(増減率)']];
     body = data.map(r => [
       r.ym, trPdfNum(r.total_qty), trPdfNum(r.total_man_days, 3), String(r.record_count),
       r.record_count > 0 ? trPdfNum(r.qty_per_record) : '－',
@@ -5705,7 +5705,7 @@ async function exportTransportAnalysisPdf(kind, data, params, monthly) {
     ]);
     colStyles = { 1:{halign:'right'},2:{halign:'right'},3:{halign:'right'},4:{halign:'right'},5:{halign:'right'},6:{halign:'right'},7:{halign:'right'},8:{halign:'right'} };
   } else if (kind === 'yearly') {
-    head = [['年','運搬数量(kg)','運搬人工','運搬件数','1件当たり(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)','前年比(増減率)']];
+    head = [['年','積込・運搬数量(kg)','積込・運搬人工','積込・運搬件数','1件当たり(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)','前年比(増減率)']];
     body = data.map(r => [
       r.year, trPdfNum(r.total_qty), trPdfNum(r.total_man_days, 3), String(r.record_count),
       r.record_count > 0 ? trPdfNum(r.qty_per_record) : '－',
@@ -5715,7 +5715,7 @@ async function exportTransportAnalysisPdf(kind, data, params, monthly) {
     ]);
     colStyles = { 1:{halign:'right'},2:{halign:'right'},3:{halign:'right'},4:{halign:'right'},5:{halign:'right'},6:{halign:'right'},7:{halign:'right'},8:{halign:'right'} };
   } else if (kind === 'workers') {
-    head = [['運搬人員','担当人工','担当件数','担当日数','担当運搬数量(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)']];
+    head = [['積込・運搬人員','担当人工','担当件数','担当日数','担当積込・運搬数量(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)']];
     body = data.map(r => [
       r.worker_name, trPdfNum(r.total_man_days, 3), String(r.record_count), String(r.days),
       trPdfNum(r.total_qty),
@@ -5746,7 +5746,7 @@ async function exportTransportAnalysisPdf(kind, data, params, monthly) {
     doc.text('月別推移', 40, y2);
     doc.autoTable({
       startY: y2 + 6,
-      head: [['月','運搬数量(kg)','運搬人工','1人工当たり(kg/人工)']],
+      head: [['月','積込・運搬数量(kg)','積込・運搬人工','1人工当たり(kg/人工)']],
       body: monthly.map(r => [ r.ym, trPdfNum(r.total_qty), trPdfNum(r.total_man_days, 3), r.total_man_days > 0 ? trPdfNum(r.qty_per_man_day, 1) : '－' ]),
       theme: 'grid',
       styles:     { font: PDF_FONT_NAME, fontStyle: 'normal', fontSize: 8, overflow: 'linebreak', valign: 'middle' },
@@ -5758,7 +5758,7 @@ async function exportTransportAnalysisPdf(kind, data, params, monthly) {
     });
   }
 
-  const fn = `運搬数量分析_${label}_${params.dateFrom || params.year || '全期間'}_${params.factory === 'all' ? '全体合算' : params.factory}.pdf`;
+  const fn = `積込・運搬数量分析_${label}_${params.dateFrom || params.year || '全期間'}_${params.factory === 'all' ? '全体合算' : params.factory}.pdf`;
   doc.save(fn);
 }
 

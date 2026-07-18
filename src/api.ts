@@ -746,7 +746,7 @@ const VEHICLE_MAX_LEN = 100
 // 入力形式: Array<{ worker_name?: string, name?: string, man_days: number|string }>
 // 戻り値: 有効な { worker_name, man_days } のみ / 同一名は409対象なので配列内重複は保持しない (Setで排除)
 function normalizeTransportWorkers(input: any): { workers: Array<{worker_name: string; man_days: number}>, error?: string } {
-  if (!Array.isArray(input)) return { workers: [], error: '運搬人員が正しくありません' }
+  if (!Array.isArray(input)) return { workers: [], error: '積込・運搬人員が正しくありません' }
   const seen = new Set<string>()
   const out: Array<{worker_name: string; man_days: number}> = []
   for (const raw of input) {
@@ -754,26 +754,26 @@ function normalizeTransportWorkers(input: any): { workers: Array<{worker_name: s
     const name = String(raw.worker_name ?? raw.name ?? '').trim()
     if (!name) continue
     if (seen.has(name)) {
-      return { workers: [], error: `同一の運搬人員 "${name}" が重複しています` }
+      return { workers: [], error: `同一の積込・運搬人員 "${name}" が重複しています` }
     }
     seen.add(name)
     // man_days 検証: 数値 & > 0 & 小数第3位まで許容 (第4位以降は丸め)
     const rawMd = raw.man_days
     if (rawMd === '' || rawMd == null) {
-      return { workers: [], error: `運搬人員 "${name}" の人工が未入力です` }
+      return { workers: [], error: `積込・運搬人員 "${name}" の人工が未入力です` }
     }
     const md = Number(rawMd)
     if (!isFinite(md)) {
-      return { workers: [], error: `運搬人員 "${name}" の人工が数値ではありません` }
+      return { workers: [], error: `積込・運搬人員 "${name}" の人工が数値ではありません` }
     }
     if (md <= 0) {
-      return { workers: [], error: `運搬人員 "${name}" の人工は0より大きい値を指定してください` }
+      return { workers: [], error: `積込・運搬人員 "${name}" の人工は0より大きい値を指定してください` }
     }
     // 小数第3位で丸める
     const rounded = Math.round(md * 1000) / 1000
     out.push({ worker_name: name, man_days: rounded })
   }
-  if (out.length === 0) return { workers: [], error: '運搬人員を1名以上入力してください' }
+  if (out.length === 0) return { workers: [], error: '積込・運搬人員を1名以上入力してください' }
   return { workers: out }
 }
 
@@ -917,17 +917,17 @@ api.post('/transport-records', authMiddleware, async (c) => {
     return c.json({ error: '工場区分は「本社工場」または「第二工場」を選択してください' }, 400)
   }
   const vehicle = String(body.vehicle ?? '').trim()
-  if (!vehicle) return c.json({ error: '運搬車両を入力してください' }, 400)
+  if (!vehicle) return c.json({ error: '積込・運搬車両を入力してください' }, 400)
   if (vehicle.length > VEHICLE_MAX_LEN) {
-    return c.json({ error: `運搬車両は ${VEHICLE_MAX_LEN} 文字以内で入力してください` }, 400)
+    return c.json({ error: `積込・運搬車両は ${VEHICLE_MAX_LEN} 文字以内で入力してください` }, 400)
   }
   const qtyRaw = body.transport_quantity_kg
   if (qtyRaw === '' || qtyRaw == null) {
-    return c.json({ error: '運搬数量を入力してください' }, 400)
+    return c.json({ error: '積込・運搬数量を入力してください' }, 400)
   }
   const qtyIn = Number(qtyRaw)
-  if (!isFinite(qtyIn)) return c.json({ error: '運搬数量は数値で入力してください' }, 400)
-  if (qtyIn <= 0) return c.json({ error: '運搬数量は0より大きい値を指定してください' }, 400)
+  if (!isFinite(qtyIn)) return c.json({ error: '積込・運搬数量は数値で入力してください' }, 400)
+  if (qtyIn <= 0) return c.json({ error: '積込・運搬数量は0より大きい値を指定してください' }, 400)
   // 運搬数量は小数第3位まで保持。それより下位は四捨五入する。
   const qty = Math.round(qtyIn * 1000) / 1000
 
@@ -947,7 +947,7 @@ api.post('/transport-records', authMiddleware, async (c) => {
       const sig = JSON.stringify(w2.map(w => ({ n: w.worker_name, m: Number(w.man_days) })).sort((a,b) => a.n.localeCompare(b.n)))
       if (sig === inputSig) {
         return c.json({
-          error: '同じ内容の運搬記録が既に登録されています。それでも登録する場合は「はい」を押してください。',
+          error: '同じ内容の積込・運搬記録が既に登録されています。それでも登録する場合は「はい」を押してください。',
           duplicate: true,
           existingId: cand.id
         }, 409)
@@ -991,12 +991,12 @@ api.post('/transport-records', authMiddleware, async (c) => {
         await c.env.DB.prepare('DELETE FROM transport_records WHERE id = ?').bind(recordId).run()
       } catch (e2: any) {
         return c.json({
-          error: `運搬人員の保存に失敗し、本体の巻き戻しにも失敗しました。管理者に連絡してください (recordId=${recordId})`,
+          error: `積込・運搬人員の保存に失敗し、本体の巻き戻しにも失敗しました。管理者に連絡してください (recordId=${recordId})`,
           detail: e?.message || String(e),
           rollbackError: e2?.message || String(e2)
         }, 500)
       }
-      return c.json({ error: '運搬人員の保存に失敗しました: ' + (e?.message || String(e)) }, 500)
+      return c.json({ error: '積込・運搬人員の保存に失敗しました: ' + (e?.message || String(e)) }, 500)
     }
 
     const w2 = await loadTransportWorkers(c.env.DB, recordId)
@@ -1034,10 +1034,10 @@ api.put('/transport-records/:id', authMiddleware, async (c) => {
     return c.json({ error: '工場区分は「本社工場」または「第二工場」を選択してください' }, 400)
   }
   const vehicle = String(body.vehicle ?? '').trim()
-  if (!vehicle) return c.json({ error: '運搬車両を入力してください' }, 400)
-  if (vehicle.length > VEHICLE_MAX_LEN) return c.json({ error: `運搬車両は ${VEHICLE_MAX_LEN} 文字以内で入力してください` }, 400)
+  if (!vehicle) return c.json({ error: '積込・運搬車両を入力してください' }, 400)
+  if (vehicle.length > VEHICLE_MAX_LEN) return c.json({ error: `積込・運搬車両は ${VEHICLE_MAX_LEN} 文字以内で入力してください` }, 400)
   const qtyIn = Number(body.transport_quantity_kg)
-  if (!isFinite(qtyIn) || qtyIn <= 0) return c.json({ error: '運搬数量は0より大きい数値を指定してください' }, 400)
+  if (!isFinite(qtyIn) || qtyIn <= 0) return c.json({ error: '積込・運搬数量は0より大きい数値を指定してください' }, 400)
   // 運搬数量は小数第3位まで保持
   const qty = Math.round(qtyIn * 1000) / 1000
 
