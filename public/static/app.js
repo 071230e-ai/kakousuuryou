@@ -384,6 +384,8 @@ const api = {
       const msg = err?.response?.data?.error || err?.message || String(err);
       const status = err?.response?.status || 0;
       const e = new Error(msg); e.status = status; e.original = err;
+      // レスポンス本文全体も持たせる (楽観ロック conflict / 重複 duplicate フラグ等をハンドリング用)
+      e.data = err?.response?.data || null;
       throw e;
     }
   },
@@ -411,7 +413,19 @@ const api = {
   workerAnalytics(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/workers', { params })).data.data || []); },
   workerMonthly(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/workers/monthly', { params })).data.data || []); },
   // 部位別1人工あたり加工数量 (新計算ルール: 部位別人工数 = 各日のstaff × 部位数量/total_qty を積算)
-  partsPerManDay(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/parts-per-manday', { params })).data); }
+  partsPerManDay(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/parts-per-manday', { params })).data); },
+
+  // ==== 運搬数量 (加工数量とは独立) ====
+  listTransport(params = {}) { return this._safeRequest(async () => (await axios.get('/api/transport-records', { params })).data.records || []); },
+  getTransport(id) { return this._safeRequest(async () => (await axios.get(`/api/transport-records/${id}`)).data.record); },
+  createTransport(data) { return this._safeRequest(async () => (await axios.post('/api/transport-records', data)).data.record); },
+  updateTransport(id, data) { return this._safeRequest(async () => (await axios.put(`/api/transport-records/${id}`, data)).data.record); },
+  deleteTransport(id) { return this._safeRequest(async () => (await axios.delete(`/api/transport-records/${id}`)).data); },
+  transportVehicles() { return this._safeRequest(async () => (await axios.get('/api/transport-records/vehicles')).data.vehicles || []); },
+  transportDaily(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/transport/daily', { params })).data.data || []); },
+  transportMonthly(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/transport/monthly', { params })).data.data || []); },
+  transportYearly(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/transport/yearly', { params })).data); },
+  transportWorkers(params) { return this._safeRequest(async () => (await axios.get('/api/analytics/transport/workers', { params })).data.data || []); }
 };
 
 // ========== ローディング/エラー画面 ==========
@@ -562,6 +576,10 @@ function renderLayout() {
           ${navBtn('monthly','calendar-alt','月別分析')}
           ${navBtn('yearly','calendar','年間分析')}
           ${navBtn('workers','users','人員別分析')}
+          <span class="hidden md:inline-block border-l border-gray-300 mx-1"></span>
+          ${navBtn('transport-input','truck','運搬数量入力')}
+          ${navBtn('transport-list','list','運搬実績一覧')}
+          ${navBtn('transport-analysis','chart-line','運搬数量分析')}
         </nav>
       </header>
       <main id="main" class="flex-1 max-w-7xl w-full mx-auto p-4"></main>
@@ -613,6 +631,9 @@ async function renderMain() {
       case 'monthly': await renderMonthly(); break;
       case 'yearly': await renderYearly(); break;
       case 'workers': await renderWorkers(); break;
+      case 'transport-input': renderTransportInput(); break;
+      case 'transport-list': await renderTransportList(); break;
+      case 'transport-analysis': await renderTransportAnalysis(); break;
       default: renderDashboard();
     }
   } catch (err) {
@@ -4293,6 +4314,1452 @@ async function exportWorkerPdfUnified() {
     ],
     sections
   });
+}
+
+// ============================================================================
+//  運搬数量機能 (加工数量とは完全独立)
+//  - 既存の renderInput / renderList / renderDaily / renderMonthly /
+//    renderYearly / renderWorkers / exportCsvUnified / exportPdfUnified
+//    は一切変更していない。運搬機能は本ブロック内で完結する。
+// ============================================================================
+
+// 運搬用の永続 state (view の再描画をまたいで維持)
+const transportState = {
+  editingId: null,
+  editingUpdatedAt: null, // 楽観ロック用: 編集開始時点の updated_at
+  filters: {
+    dateFrom: '',
+    dateTo: '',
+    factory: 'all',
+    vehicle: '',
+    worker: ''
+  },
+  analysisTab: 'daily',
+  analysisFilters: {
+    dateFrom: dayjs().startOf('month').format('YYYY-MM-DD'),
+    dateTo: dayjs().endOf('month').format('YYYY-MM-DD'),
+    year: String(new Date().getFullYear()),
+    factory: 'all'
+  },
+  charts: {}
+};
+
+// ---- 共通ユーティリティ (運搬専用・既存関数は流用せず独立) ----
+// 運搬数量は小数第3位まで許可 (DB REAL)。末尾の不要な0は表示しない。
+// 例: 8250 → "8,250" / 8250.5 → "8,250.5" / 8250.125 → "8,250.125"
+function trFmtQty(n) {
+  const v = Number(n);
+  if (!isFinite(v)) return '0';
+  return v.toLocaleString('ja-JP', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
+}
+// 1人工当たりなど「明示的に小数1桁固定」の値用 (KPI 表示)
+function trFmtQty1(n) {
+  const v = Number(n);
+  if (!isFinite(v)) return '0.0';
+  return v.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+}
+function trFmtMd(n) {
+  const v = Number(n);
+  if (!isFinite(v)) return '0.000';
+  return v.toLocaleString('ja-JP', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+}
+// 前月比・前年比（増減率）を符号付きで表示する
+// v は「増減率の実数」 例: +1.413 → +141.3% / -0.254 → -25.4% / 0 → +0.0%
+// 前月または前年が 0 または不在の場合は null が渡され「－」を返す
+function trFmtChange(v) {
+  if (v == null || !isFinite(v)) return '－';
+  const pct = v * 100;
+  const sign = pct >= 0 ? '+' : '';
+  return sign + pct.toLocaleString('ja-JP', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + '%';
+}
+// 互換: 既存コードから trFmtRatio が呼ばれても増減率にリダイレクト
+function trFmtRatio(v) { return trFmtChange(v); }
+function trDestroyCharts() {
+  Object.keys(transportState.charts).forEach(k => {
+    try { transportState.charts[k]?.destroy(); } catch (e) {}
+    delete transportState.charts[k];
+  });
+}
+
+// クライアント側 人工クランプ (バックエンドと同じロジック: >0、小数第3位まで)
+// 空欄は 0 を返し、UI 側でバリデーションする
+function trParseManDays(v) {
+  if (v === '' || v == null) return null;
+  const n = Number(v);
+  if (!isFinite(n)) return null;
+  if (n <= 0) return 0;
+  return Math.round(n * 1000) / 1000;
+}
+
+// ============================================================================
+//  運搬数量入力画面
+// ============================================================================
+function renderTransportInput(record = null) {
+  transportState.editingId = record?.id || null;
+  // 楽観ロック用: 編集開始時点の updated_at を保持。PUT 送信時に expected_updated_at として送る。
+  transportState.editingUpdatedAt = record?.updated_at || null;
+  const isEdit = !!record;
+  const r = record || {
+    transport_date: dayjs().format('YYYY-MM-DD'),
+    factory: '本社工場',
+    vehicle: '',
+    transport_quantity_kg: '',
+    workers: []
+  };
+  // ローカル workers: [{worker_name, man_days}]
+  let workers = Array.isArray(r.workers) ? r.workers.map(w => ({
+    worker_name: String(w.worker_name || '').trim(),
+    man_days: (w.man_days === '' || w.man_days == null) ? '' : Number(w.man_days)
+  })) : [];
+  if (workers.length === 0 && !isEdit) workers = [{ worker_name: '', man_days: '' }];
+
+  const main = document.getElementById('main');
+  main.innerHTML = `
+    <div class="max-w-3xl mx-auto">
+      <h2 class="text-xl font-bold text-gray-800 mb-4">
+        <i class="fas fa-truck mr-2"></i>${isEdit ? '運搬実績の編集' : '運搬数量入力'}
+      </h2>
+      <form id="transportForm" class="bg-white rounded-xl shadow-sm p-6 space-y-5">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">日付 <span class="text-red-500">*</span></label>
+            <input id="tr_date" type="date" required value="${r.transport_date || ''}" class="input-base" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">工場の別 <span class="text-red-500">*</span></label>
+            <select id="tr_factory" required class="input-base">
+              <option value="本社工場" ${r.factory === '本社工場' ? 'selected' : ''}>本社工場</option>
+              <option value="第二工場" ${r.factory === '第二工場' ? 'selected' : ''}>第二工場</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="bg-indigo-50 border border-indigo-200 p-4 rounded-lg">
+          <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <h3 class="font-semibold text-indigo-900">
+              <i class="fas fa-users mr-1"></i>運搬人員・人工 <span id="tr_workerCount" class="text-xs font-normal text-gray-600 ml-1"></span>
+            </h3>
+            <button type="button" id="tr_addWorkerBtn" class="btn-secondary text-sm">
+              <i class="fas fa-plus mr-1"></i>人員を追加
+            </button>
+          </div>
+          <p class="text-xs text-gray-600 mb-2">運搬人員と人工を入力してください。人工は 0 より大きい数値・小数第3位まで（1人工＝7時間）。合計人工が下に自動表示されます。</p>
+          <div id="tr_workerList" class="space-y-2"></div>
+          <div class="mt-3 text-right">
+            <span class="text-sm text-gray-600 mr-2">合計人工</span>
+            <span id="tr_totalMd" class="text-lg font-bold text-indigo-700">0.000</span>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">運搬車両 <span class="text-red-500">*</span></label>
+            <input id="tr_vehicle" type="text" required maxlength="100" value="${escapeHtml(r.vehicle || '')}" placeholder="例: 10t車、8tユニック、京都100あ12-34" class="input-base" list="tr_vehicleList" />
+            <datalist id="tr_vehicleList"></datalist>
+            <p class="text-xs text-gray-500 mt-1">車両区分は自由入力です（100文字以内）</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">運搬数量 <span class="text-red-500">*</span></label>
+            <div class="flex items-center gap-2">
+              <input id="tr_qty" type="number" required min="0.001" step="0.001" value="${(r.transport_quantity_kg === 0 || r.transport_quantity_kg) ? r.transport_quantity_kg : ''}" placeholder="例: 12500" class="input-num flex-1" inputmode="decimal" />
+              <span class="text-gray-700 font-medium">kg</span>
+            </div>
+            <p class="text-xs text-gray-500 mt-1">0より大きい数値・小数入力可</p>
+          </div>
+        </div>
+
+        <div class="flex gap-3 pt-2">
+          <button type="submit" id="tr_submitBtn" class="btn-primary flex-1">
+            <i class="fas fa-save mr-2"></i>${isEdit ? '更新する' : '登録する'}
+          </button>
+          <button type="button" id="tr_clearBtn" class="btn-secondary">
+            <i class="fas fa-eraser mr-1"></i>クリア
+          </button>
+          ${isEdit ? `<button type="button" id="tr_cancelEditBtn" class="btn-secondary">キャンセル</button>` : ''}
+        </div>
+        <div id="tr_formError" class="text-red-600 text-sm hidden"></div>
+        <div id="tr_formSuccess" class="text-green-700 text-sm hidden"></div>
+      </form>
+    </div>
+  `;
+
+  // 車両サジェスト取得
+  api.transportVehicles().then(list => {
+    const dl = document.getElementById('tr_vehicleList');
+    if (dl && Array.isArray(list)) {
+      dl.innerHTML = list.map(v => `<option value="${escapeHtml(v)}"></option>`).join('');
+    }
+  }).catch(() => {});
+
+  // 人員マスタ取得
+  let workerMaster = [];
+  api.workers().then(list => { workerMaster = list || []; renderTrWorkerList(); }).catch(() => { renderTrWorkerList(); });
+
+  const renderTrWorkerList = () => {
+    const list = document.getElementById('tr_workerList');
+    if (!list) return;
+    if (workers.length === 0) {
+      list.innerHTML = `<p class="text-sm text-gray-500 italic py-2">人員が未入力です。「人員を追加」を押して追加してください。</p>`;
+    } else {
+      // 人員選択には過去マスタからサジェスト、手入力も可 (datalist)
+      list.innerHTML = workers.map((w, i) => `
+        <div class="flex flex-col sm:flex-row gap-2 sm:items-center bg-white p-2 rounded border border-indigo-100">
+          <div class="flex-1">
+            <label class="text-xs text-gray-500 sm:hidden">運搬人員</label>
+            <input type="text" data-tr-worker-name="${i}" value="${escapeHtml(w.worker_name || '')}" placeholder="人員名" class="input-base w-full" list="tr_workerMasterList" />
+          </div>
+          <div class="w-full sm:w-32">
+            <label class="text-xs text-gray-500 sm:hidden">人工</label>
+            <input type="number" data-tr-worker-md="${i}" value="${w.man_days === '' ? '' : w.man_days}" min="0.001" step="0.001" placeholder="1.000" class="input-num w-full" inputmode="decimal" />
+          </div>
+          <button type="button" data-tr-worker-del="${i}" class="btn-danger text-sm whitespace-nowrap" title="削除">
+            <i class="fas fa-trash"></i><span class="hidden sm:inline ml-1">削除</span>
+          </button>
+        </div>
+      `).join('') + `<datalist id="tr_workerMasterList">${workerMaster.map(w => `<option value="${escapeHtml(w.name)}"></option>`).join('')}</datalist>`;
+    }
+    list.querySelectorAll('[data-tr-worker-name]').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const idx = Number(e.target.dataset.trWorkerName);
+        if (workers[idx]) workers[idx].worker_name = e.target.value;
+      });
+    });
+    list.querySelectorAll('[data-tr-worker-md]').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const idx = Number(e.target.dataset.trWorkerMd);
+        if (workers[idx]) workers[idx].man_days = e.target.value === '' ? '' : Number(e.target.value);
+        recalcTotalMd();
+      });
+    });
+    list.querySelectorAll('[data-tr-worker-del]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const idx = Number(e.currentTarget.dataset.trWorkerDel);
+        workers.splice(idx, 1);
+        renderTrWorkerList();
+        recalcTotalMd();
+      });
+    });
+    recalcTotalMd();
+  };
+
+  const recalcTotalMd = () => {
+    const total = workers.reduce((s, w) => {
+      const v = Number(w.man_days);
+      return isFinite(v) && v > 0 ? s + v : s;
+    }, 0);
+    const el = document.getElementById('tr_totalMd');
+    if (el) el.textContent = trFmtMd(total);
+    const wc = document.getElementById('tr_workerCount');
+    const validNames = workers.filter(w => String(w.worker_name || '').trim()).length;
+    if (wc) wc.textContent = validNames > 0 ? `（${validNames}人 / ${trFmtMd(total)}人工）` : '';
+  };
+
+  renderTrWorkerList();
+
+  document.getElementById('tr_addWorkerBtn').addEventListener('click', () => {
+    workers.push({ worker_name: '', man_days: '' });
+    renderTrWorkerList();
+  });
+
+  document.getElementById('tr_clearBtn').addEventListener('click', () => {
+    if (!confirm('入力内容をクリアしますか？')) return;
+    workers = [{ worker_name: '', man_days: '' }];
+    document.getElementById('tr_date').value = dayjs().format('YYYY-MM-DD');
+    document.getElementById('tr_factory').value = '本社工場';
+    document.getElementById('tr_vehicle').value = '';
+    document.getElementById('tr_qty').value = '';
+    document.getElementById('tr_formError').classList.add('hidden');
+    document.getElementById('tr_formSuccess').classList.add('hidden');
+    renderTrWorkerList();
+  });
+
+  if (isEdit) {
+    document.getElementById('tr_cancelEditBtn').addEventListener('click', () => {
+      transportState.editingId = null;
+      navigateTo('transport-list');
+    });
+  }
+
+  document.getElementById('transportForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errEl = document.getElementById('tr_formError');
+    const okEl = document.getElementById('tr_formSuccess');
+    errEl.classList.add('hidden'); okEl.classList.add('hidden');
+
+    const date = document.getElementById('tr_date').value;
+    const factory = document.getElementById('tr_factory').value;
+    const vehicle = document.getElementById('tr_vehicle').value.trim();
+    const qtyRaw = document.getElementById('tr_qty').value;
+
+    // クライアント側バリデーション (サーバ側でも同様に検証)
+    if (!date) return showTrErr(errEl, '日付を入力してください');
+    if (!factory) return showTrErr(errEl, '工場の別を選択してください');
+    if (!vehicle) return showTrErr(errEl, '運搬車両を入力してください');
+    if (vehicle.length > 100) return showTrErr(errEl, '運搬車両は100文字以内で入力してください');
+    if (qtyRaw === '' || qtyRaw == null) return showTrErr(errEl, '運搬数量を入力してください');
+    const qtyNum = Number(qtyRaw);
+    if (!isFinite(qtyNum) || qtyNum <= 0) return showTrErr(errEl, '運搬数量は0より大きい数値を指定してください');
+    // 運搬数量は小数第3位まで保持 (DB REAL)。第4位以降は四捨五入する。
+    const qty = Math.round(qtyNum * 1000) / 1000;
+
+    const validWorkers = workers
+      .map(w => ({ worker_name: String(w.worker_name || '').trim(), man_days: w.man_days === '' ? null : Number(w.man_days) }))
+      .filter(w => w.worker_name);
+    if (validWorkers.length === 0) return showTrErr(errEl, '運搬人員を1名以上入力してください');
+    const nameSet = new Set();
+    for (const w of validWorkers) {
+      if (nameSet.has(w.worker_name)) return showTrErr(errEl, `同一の運搬人員 "${w.worker_name}" が重複しています`);
+      nameSet.add(w.worker_name);
+      if (w.man_days == null || !isFinite(w.man_days)) return showTrErr(errEl, `運搬人員 "${w.worker_name}" の人工が未入力です`);
+      if (w.man_days <= 0) return showTrErr(errEl, `運搬人員 "${w.worker_name}" の人工は0より大きい値を指定してください`);
+    }
+
+    const submitBtn = document.getElementById('tr_submitBtn');
+    submitBtn.disabled = true;
+    const orig = submitBtn.innerHTML;
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>処理中...';
+
+    const payload = {
+      transport_date: date,
+      factory,
+      vehicle,
+      transport_quantity_kg: qty,
+      workers: validWorkers.map(w => ({ worker_name: w.worker_name, man_days: w.man_days }))
+    };
+    // 楽観ロック: 編集時のみ、開始時点の updated_at を送る。サーバ側で現在値と比較し
+    // 不一致なら 409 (conflict) を返す。他タブ・他ユーザーの並行編集を検出する。
+    if (isEdit && transportState.editingUpdatedAt) {
+      payload.expected_updated_at = transportState.editingUpdatedAt;
+    }
+
+    try {
+      let saved;
+      if (isEdit) {
+        saved = await api.updateTransport(transportState.editingId, payload);
+      } else {
+        saved = await api.createTransport(payload);
+      }
+      // 成功時: サーバから返る最新 updated_at を保持しておく (連続編集対応)
+      transportState.editingUpdatedAt = saved.updated_at || null;
+      okEl.innerHTML = `<i class="fas fa-check-circle mr-1"></i>${isEdit ? '更新しました' : '登録しました'} (ID: ${saved.id})　<a class="underline text-blue-600" href="#" id="tr_gotoList">運搬実績一覧を見る</a>`;
+      okEl.classList.remove('hidden');
+      document.getElementById('tr_gotoList')?.addEventListener('click', (ev) => {
+        ev.preventDefault(); navigateTo('transport-list');
+      });
+      if (!isEdit) {
+        // 続けて登録できるようフォームをリセット (人員は残す)
+        document.getElementById('tr_qty').value = '';
+      }
+    } catch (err) {
+      // 楽観ロック競合 (409 + conflict:true) - 他ユーザー/他タブが先に更新した
+      if (err.status === 409 && err.data && err.data.conflict === true) {
+        submitBtn.disabled = false; submitBtn.innerHTML = orig;
+        const msg = '他のユーザーによりこの運搬記録が更新されています。最新の内容を再読み込みしてから、もう一度編集してください。';
+        if (confirm(msg + '\n\n[OK] 最新データを取り直して編集を続ける / [キャンセル] 一覧へ戻る')) {
+          try {
+            const fresh = await api.getTransport(transportState.editingId);
+            renderTransportInput(fresh);
+          } catch (e2) {
+            showTrErr(errEl, '最新データの取得に失敗しました: ' + (e2.message || String(e2)));
+          }
+        } else {
+          navigateTo('transport-list');
+        }
+        return;
+      }
+      // 重複警告 (409 + duplicate:true) の場合、ユーザーに確認して再送
+      if (err.status === 409 && err.data && err.data.duplicate === true) {
+        submitBtn.disabled = false; submitBtn.innerHTML = orig;
+        if (confirm(err.message + '\n\nそれでも登録しますか？')) {
+          submitBtn.disabled = true; submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>処理中...';
+          try {
+            const saved = await api.createTransport({ ...payload, duplicateAck: true });
+            transportState.editingUpdatedAt = saved.updated_at || null;
+            okEl.innerHTML = `<i class="fas fa-check-circle mr-1"></i>登録しました (ID: ${saved.id})`;
+            okEl.classList.remove('hidden');
+            document.getElementById('tr_qty').value = '';
+          } catch (err2) {
+            showTrErr(errEl, err2.message || String(err2));
+          } finally {
+            submitBtn.disabled = false; submitBtn.innerHTML = orig;
+          }
+        } else {
+          submitBtn.disabled = false; submitBtn.innerHTML = orig;
+        }
+        return;
+      }
+      showTrErr(errEl, err.message || String(err));
+    } finally {
+      submitBtn.disabled = false; submitBtn.innerHTML = orig;
+    }
+  });
+
+  function showTrErr(el, msg) {
+    el.innerHTML = `<i class="fas fa-exclamation-circle mr-1"></i>${escapeHtml(msg)}`;
+    el.classList.remove('hidden');
+  }
+}
+
+// ============================================================================
+//  運搬実績一覧
+// ============================================================================
+async function renderTransportList() {
+  const main = document.getElementById('main');
+  const f = transportState.filters;
+  main.innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h2 class="text-xl font-bold text-gray-800">
+          <i class="fas fa-list mr-2"></i>運搬実績一覧
+        </h2>
+        <div class="flex gap-2 flex-wrap">
+          <button id="tr_list_csv" class="btn-secondary text-sm"><i class="fas fa-file-csv mr-1"></i>CSV</button>
+          <button id="tr_list_pdf" class="btn-secondary text-sm"><i class="fas fa-file-pdf mr-1"></i>PDF</button>
+          <button id="tr_list_new" class="btn-primary text-sm"><i class="fas fa-plus mr-1"></i>新規登録</button>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-xl shadow-sm p-4">
+        <div class="grid grid-cols-2 md:grid-cols-6 gap-3">
+          <div>
+            <label class="text-xs text-gray-600">開始日</label>
+            <input id="tr_f_from" type="date" value="${f.dateFrom || ''}" class="input-base" />
+          </div>
+          <div>
+            <label class="text-xs text-gray-600">終了日</label>
+            <input id="tr_f_to" type="date" value="${f.dateTo || ''}" class="input-base" />
+          </div>
+          <div>
+            <label class="text-xs text-gray-600">工場</label>
+            <select id="tr_f_factory" class="input-base">
+              <option value="all" ${f.factory === 'all' ? 'selected' : ''}>全工場合算</option>
+              <option value="本社工場" ${f.factory === '本社工場' ? 'selected' : ''}>本社工場</option>
+              <option value="第二工場" ${f.factory === '第二工場' ? 'selected' : ''}>第二工場</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs text-gray-600">運搬人員 (部分一致)</label>
+            <input id="tr_f_worker" type="text" value="${escapeHtml(f.worker || '')}" placeholder="例: 山田" class="input-base" />
+          </div>
+          <div>
+            <label class="text-xs text-gray-600">運搬車両 (部分一致)</label>
+            <input id="tr_f_vehicle" type="text" value="${escapeHtml(f.vehicle || '')}" placeholder="例: 10t" class="input-base" />
+          </div>
+          <div class="flex items-end gap-1">
+            <button id="tr_f_apply" class="btn-primary text-sm flex-1"><i class="fas fa-filter mr-1"></i>絞込</button>
+            <button id="tr_f_reset" class="btn-secondary text-sm"><i class="fas fa-undo"></i></button>
+          </div>
+        </div>
+      </div>
+
+      <div id="tr_summaryArea" class="grid grid-cols-2 md:grid-cols-4 gap-3"></div>
+
+      <div id="tr_listArea" class="bg-white rounded-xl shadow-sm p-2 md:p-4"></div>
+    </div>
+  `;
+
+  document.getElementById('tr_list_new').addEventListener('click', () => navigateTo('transport-input'));
+  document.getElementById('tr_f_apply').addEventListener('click', () => reloadTrList());
+  document.getElementById('tr_f_reset').addEventListener('click', () => {
+    transportState.filters = { dateFrom: '', dateTo: '', factory: 'all', vehicle: '', worker: '' };
+    renderTransportList();
+  });
+
+  await reloadTrList();
+}
+
+async function reloadTrList() {
+  const f = transportState.filters;
+  f.dateFrom = document.getElementById('tr_f_from').value || '';
+  f.dateTo = document.getElementById('tr_f_to').value || '';
+  f.factory = document.getElementById('tr_f_factory').value || 'all';
+  f.worker = document.getElementById('tr_f_worker').value.trim();
+  f.vehicle = document.getElementById('tr_f_vehicle').value.trim();
+
+  const area = document.getElementById('tr_listArea');
+  setSectionLoading(area);
+  try {
+    const records = await api.listTransport({
+      dateFrom: f.dateFrom || undefined,
+      dateTo: f.dateTo || undefined,
+      factory: f.factory,
+      worker: f.worker || undefined,
+      vehicle: f.vehicle || undefined
+    });
+    renderTrListTable(records);
+    document.getElementById('tr_list_csv').onclick = () => exportTransportListCsv(records, f);
+    (() => {
+      const btn = document.getElementById('tr_list_pdf');
+      btn.onclick = () => trRunPdfExport(btn, () => exportTransportListPdf(records, f));
+    })();
+  } catch (err) {
+    setSectionError(area, err.message || String(err), {
+      onSample: false,
+      retry: () => reloadTrList()
+    });
+  }
+}
+
+function renderTrListTable(records) {
+  const area = document.getElementById('tr_listArea');
+  const sumArea = document.getElementById('tr_summaryArea');
+  const totalQty = records.reduce((s, r) => s + (Number(r.transport_quantity_kg) || 0), 0);
+  const totalMd = records.reduce((s, r) => s + (Number(r.total_man_days) || 0), 0);
+  const count = records.length;
+  const perMd = totalMd > 0 ? totalQty / totalMd : 0;
+
+  sumArea.innerHTML = `
+    <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-blue-500">
+      <p class="text-xs text-gray-500">運搬件数</p>
+      <p class="text-2xl font-bold text-gray-800">${count} 件</p>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-green-500">
+      <p class="text-xs text-gray-500">運搬数量合計</p>
+      <p class="text-2xl font-bold text-green-700">${trFmtQty(totalQty)} <span class="text-sm">kg</span></p>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-indigo-500">
+      <p class="text-xs text-gray-500">人工合計</p>
+      <p class="text-2xl font-bold text-indigo-700">${trFmtMd(totalMd)}</p>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-purple-500">
+      <p class="text-xs text-gray-500">1人工当たり運搬数量</p>
+      <p class="text-2xl font-bold text-purple-700">${totalMd > 0 ? trFmtQty1(perMd) : '－'} <span class="text-sm">kg/人工</span></p>
+    </div>
+  `;
+
+  if (records.length === 0) {
+    area.innerHTML = `<div class="text-center py-10 text-gray-500"><i class="fas fa-inbox text-3xl"></i><p class="mt-2">該当する運搬記録がありません</p></div>`;
+    return;
+  }
+
+  const isAdmin = state.user?.role === 'admin';
+  // デスクトップ表: table / モバイル: カード表示
+  const rows = records.map(r => {
+    const workersStr = (r.workers || []).map(w => `${escapeHtml(w.worker_name)}(${trFmtMd(w.man_days)})`).join(', ');
+    const perMd = (Number(r.total_man_days) || 0) > 0 ? Number(r.transport_quantity_kg) / Number(r.total_man_days) : null;
+    return { r, workersStr, perMd };
+  });
+
+  area.innerHTML = `
+    <!-- デスクトップ: テーブル -->
+    <div class="overflow-x-auto hidden md:block">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-100">
+          <tr class="text-left">
+            <th class="px-2 py-2">日付</th>
+            <th class="px-2 py-2">工場</th>
+            <th class="px-2 py-2">運搬人員 (人工)</th>
+            <th class="px-2 py-2 text-right">合計人工</th>
+            <th class="px-2 py-2">運搬車両</th>
+            <th class="px-2 py-2 text-right">運搬数量</th>
+            <th class="px-2 py-2 text-right">1人工当たり</th>
+            <th class="px-2 py-2 text-center">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(({r, workersStr, perMd}) => `
+            <tr class="border-t border-gray-100 hover:bg-blue-50">
+              <td class="px-2 py-2 whitespace-nowrap">${escapeHtml(r.transport_date)}</td>
+              <td class="px-2 py-2 whitespace-nowrap">${escapeHtml(r.factory)}</td>
+              <td class="px-2 py-2">${workersStr}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtMd(r.total_man_days)}</td>
+              <td class="px-2 py-2 whitespace-nowrap">${escapeHtml(r.vehicle)}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap font-semibold">${trFmtQty(r.transport_quantity_kg)} kg</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${perMd != null ? trFmtQty1(perMd) + ' kg' : '－'}</td>
+              <td class="px-2 py-2 text-center whitespace-nowrap">
+                <button data-tr-edit="${r.id}" class="text-blue-600 hover:underline text-xs mr-1"><i class="fas fa-edit"></i>編集</button>
+                ${isAdmin ? `<button data-tr-del="${r.id}" class="text-red-600 hover:underline text-xs"><i class="fas fa-trash"></i>削除</button>` : ''}
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- モバイル: カード -->
+    <div class="md:hidden space-y-2">
+      ${rows.map(({r, workersStr, perMd}) => `
+        <div class="border border-gray-200 rounded-lg p-3 bg-white">
+          <div class="flex items-center justify-between mb-2">
+            <span class="font-semibold">${escapeHtml(r.transport_date)}</span>
+            <span class="text-xs px-2 py-0.5 rounded ${r.factory === '本社工場' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}">${escapeHtml(r.factory)}</span>
+          </div>
+          <div class="text-sm space-y-1">
+            <div><span class="text-gray-500">車両:</span> ${escapeHtml(r.vehicle)}</div>
+            <div><span class="text-gray-500">人員:</span> ${workersStr}</div>
+            <div><span class="text-gray-500">合計人工:</span> ${trFmtMd(r.total_man_days)} / <span class="text-gray-500">1人工当たり:</span> ${perMd != null ? trFmtQty1(perMd) + ' kg' : '－'}</div>
+            <div class="text-lg font-bold text-green-700">${trFmtQty(r.transport_quantity_kg)} kg</div>
+          </div>
+          <div class="mt-2 flex gap-2 justify-end">
+            <button data-tr-edit="${r.id}" class="btn-secondary text-xs"><i class="fas fa-edit mr-1"></i>編集</button>
+            ${isAdmin ? `<button data-tr-del="${r.id}" class="btn-danger text-xs"><i class="fas fa-trash mr-1"></i>削除</button>` : ''}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+
+  area.querySelectorAll('[data-tr-edit]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      const id = Number(e.currentTarget.dataset.trEdit);
+      try {
+        const rec = await api.getTransport(id);
+        state.view = 'transport-input';
+        document.querySelectorAll('[data-nav]').forEach(b => b.classList.toggle('active', b.dataset.nav === 'transport-input'));
+        renderTransportInput(rec);
+      } catch (err) {
+        alert('取得失敗: ' + (err.message || String(err)));
+      }
+    });
+  });
+  area.querySelectorAll('[data-tr-del]').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      const id = Number(e.currentTarget.dataset.trDel);
+      if (!confirm(`運搬記録 ID: ${id} を削除します。よろしいですか？`)) return;
+      try {
+        await api.deleteTransport(id);
+        await reloadTrList();
+      } catch (err) {
+        alert('削除失敗: ' + (err.message || String(err)));
+      }
+    });
+  });
+}
+
+// ============================================================================
+//  運搬数量分析 (日別 / 月別 / 年別 / 人員別 タブ)
+//  加工数量データは一切参照しない (バックエンド側も同じ)。
+// ============================================================================
+async function renderTransportAnalysis() {
+  const main = document.getElementById('main');
+  const af = transportState.analysisFilters;
+  const tab = transportState.analysisTab;
+
+  main.innerHTML = `
+    <div class="space-y-4">
+      <div class="flex items-center justify-between flex-wrap gap-2">
+        <h2 class="text-xl font-bold text-gray-800">
+          <i class="fas fa-chart-line mr-2"></i>運搬数量分析
+        </h2>
+        <div class="flex gap-2">
+          <button id="tra_csv" class="btn-secondary text-sm"><i class="fas fa-file-csv mr-1"></i>CSV</button>
+          <button id="tra_pdf" class="btn-secondary text-sm"><i class="fas fa-file-pdf mr-1"></i>PDF</button>
+        </div>
+      </div>
+
+      <div class="flex gap-2 flex-wrap border-b">
+        ${['daily','monthly','yearly','workers'].map(t => `
+          <button data-tra-tab="${t}" class="px-4 py-2 -mb-px border-b-2 ${tab === t ? 'border-blue-600 text-blue-600 font-semibold' : 'border-transparent text-gray-600 hover:text-blue-600'}">
+            ${({daily:'日別', monthly:'月別', yearly:'年別', workers:'人員別'})[t]}
+          </button>
+        `).join('')}
+      </div>
+
+      <div class="bg-white rounded-xl shadow-sm p-4">
+        <div id="tra_filter_area" class="grid grid-cols-2 md:grid-cols-5 gap-3"></div>
+      </div>
+
+      <div id="tra_summary" class="grid grid-cols-2 md:grid-cols-5 gap-3"></div>
+
+      <div id="tra_body" class="space-y-4"></div>
+    </div>
+  `;
+
+  renderTraFilters();
+
+  document.querySelectorAll('[data-tra-tab]').forEach(b => {
+    b.addEventListener('click', () => {
+      transportState.analysisTab = b.dataset.traTab;
+      renderTransportAnalysis();
+    });
+  });
+
+  await loadTraTab();
+}
+
+function renderTraFilters() {
+  const af = transportState.analysisFilters;
+  const tab = transportState.analysisTab;
+  const area = document.getElementById('tra_filter_area');
+  // 日別・人員別は期間 / 月別は年 / 年別は工場のみ (期間指定は月別推移用として残す)
+  const commonFactory = `
+    <div>
+      <label class="text-xs text-gray-600">工場</label>
+      <select id="tra_factory" class="input-base">
+        <option value="all" ${af.factory === 'all' ? 'selected' : ''}>全工場合算</option>
+        <option value="本社工場" ${af.factory === '本社工場' ? 'selected' : ''}>本社工場</option>
+        <option value="第二工場" ${af.factory === '第二工場' ? 'selected' : ''}>第二工場</option>
+      </select>
+    </div>`;
+  if (tab === 'daily' || tab === 'workers') {
+    area.innerHTML = `
+      <div><label class="text-xs text-gray-600">開始日</label><input id="tra_from" type="date" value="${af.dateFrom}" class="input-base" /></div>
+      <div><label class="text-xs text-gray-600">終了日</label><input id="tra_to" type="date" value="${af.dateTo}" class="input-base" /></div>
+      ${commonFactory}
+      <div class="flex items-end"><button id="tra_apply" class="btn-primary text-sm w-full"><i class="fas fa-filter mr-1"></i>適用</button></div>
+    `;
+  } else if (tab === 'monthly') {
+    area.innerHTML = `
+      <div><label class="text-xs text-gray-600">年</label><input id="tra_year" type="number" min="2000" max="2100" value="${af.year}" class="input-base" /></div>
+      ${commonFactory}
+      <div class="flex items-end"><button id="tra_apply" class="btn-primary text-sm w-full"><i class="fas fa-filter mr-1"></i>適用</button></div>
+    `;
+  } else { // yearly
+    area.innerHTML = `
+      ${commonFactory}
+      <div class="flex items-end"><button id="tra_apply" class="btn-primary text-sm w-full"><i class="fas fa-filter mr-1"></i>適用</button></div>
+    `;
+  }
+  document.getElementById('tra_apply').addEventListener('click', () => {
+    const t = transportState.analysisTab;
+    if (t === 'daily' || t === 'workers') {
+      af.dateFrom = document.getElementById('tra_from').value || '';
+      af.dateTo = document.getElementById('tra_to').value || '';
+    } else if (t === 'monthly') {
+      af.year = document.getElementById('tra_year').value || String(new Date().getFullYear());
+    }
+    af.factory = document.getElementById('tra_factory').value || 'all';
+    loadTraTab();
+  });
+}
+
+async function loadTraTab() {
+  const body = document.getElementById('tra_body');
+  const sum = document.getElementById('tra_summary');
+  const tab = transportState.analysisTab;
+  const af = transportState.analysisFilters;
+  trDestroyCharts();
+  setSectionLoading(body);
+  sum.innerHTML = '';
+
+  const params = {
+    dateFrom: af.dateFrom || undefined,
+    dateTo: af.dateTo || undefined,
+    year: (tab === 'monthly') ? af.year : undefined,
+    factory: af.factory
+  };
+  try {
+    if (tab === 'daily') {
+      const data = await api.transportDaily(params);
+      renderTraSummary(sum, data);
+      renderTraDaily(body, data);
+      document.getElementById('tra_csv').onclick = () => exportTransportAnalysisCsv('daily', data, params);
+      { const btn = document.getElementById('tra_pdf'); btn.onclick = () => trRunPdfExport(btn, () => exportTransportAnalysisPdf('daily', data, params)); }
+    } else if (tab === 'monthly') {
+      const data = await api.transportMonthly(params);
+      renderTraSummary(sum, data);
+      renderTraMonthly(body, data);
+      document.getElementById('tra_csv').onclick = () => exportTransportAnalysisCsv('monthly', data, params);
+      { const btn = document.getElementById('tra_pdf'); btn.onclick = () => trRunPdfExport(btn, () => exportTransportAnalysisPdf('monthly', data, params)); }
+    } else if (tab === 'yearly') {
+      const r = await api.transportYearly(params);
+      renderTraSummary(sum, r.data);
+      renderTraYearly(body, r.data, r.monthly);
+      document.getElementById('tra_csv').onclick = () => exportTransportAnalysisCsv('yearly', r.data, params, r.monthly);
+      { const btn = document.getElementById('tra_pdf'); btn.onclick = () => trRunPdfExport(btn, () => exportTransportAnalysisPdf('yearly', r.data, params, r.monthly)); }
+    } else if (tab === 'workers') {
+      const data = await api.transportWorkers(params);
+      renderTraSummary(sum, data);
+      renderTraWorkers(body, data);
+      document.getElementById('tra_csv').onclick = () => exportTransportAnalysisCsv('workers', data, params);
+      { const btn = document.getElementById('tra_pdf'); btn.onclick = () => trRunPdfExport(btn, () => exportTransportAnalysisPdf('workers', data, params)); }
+    }
+  } catch (err) {
+    setSectionError(body, err.message || String(err), { onSample: false, retry: () => loadTraTab() });
+  }
+}
+
+function renderTraSummary(el, data) {
+  const totalQty = data.reduce((s, r) => s + (Number(r.total_qty) || 0), 0);
+  const totalMd = data.reduce((s, r) => s + (Number(r.total_man_days) || 0), 0);
+  const totalRc = data.reduce((s, r) => s + (Number(r.record_count) || 0), 0);
+  const perRec = totalRc > 0 ? totalQty / totalRc : 0;
+  const perMd = totalMd > 0 ? totalQty / totalMd : 0;
+  el.innerHTML = `
+    <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-green-500">
+      <p class="text-xs text-gray-500">運搬数量</p>
+      <p class="text-xl font-bold text-green-700">${trFmtQty(totalQty)} <span class="text-sm">kg</span></p>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-indigo-500">
+      <p class="text-xs text-gray-500">運搬人工</p>
+      <p class="text-xl font-bold text-indigo-700">${trFmtMd(totalMd)}</p>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-blue-500">
+      <p class="text-xs text-gray-500">運搬件数</p>
+      <p class="text-xl font-bold text-blue-700">${totalRc}</p>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-teal-500">
+      <p class="text-xs text-gray-500">1件当たり運搬数量</p>
+      <p class="text-xl font-bold text-teal-700">${totalRc > 0 ? trFmtQty(perRec) : '－'} <span class="text-sm">kg</span></p>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm p-3 border-l-4 border-purple-500">
+      <p class="text-xs text-gray-500">1人工当たり運搬数量</p>
+      <p class="text-xl font-bold text-purple-700">${totalMd > 0 ? trFmtQty1(perMd) : '－'} <span class="text-sm">kg/人工</span></p>
+    </div>
+  `;
+}
+
+// ---- 日別 ----
+function renderTraDaily(el, data) {
+  if (data.length === 0) {
+    el.innerHTML = trEmptyPanel('日別データがありません');
+    return;
+  }
+  el.innerHTML = `
+    <div class="bg-white rounded-xl shadow-sm p-4">
+      <h3 class="font-semibold mb-2">日別推移グラフ</h3>
+      <div class="relative" style="height:260px"><canvas id="tra_daily_chart"></canvas></div>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm p-2 md:p-4 overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-100">
+          <tr class="text-left">
+            <th class="px-2 py-2">日付</th>
+            <th class="px-2 py-2 text-right">運搬数量</th>
+            <th class="px-2 py-2 text-right">運搬人工</th>
+            <th class="px-2 py-2 text-right">運搬件数</th>
+            <th class="px-2 py-2 text-right">1件当たり</th>
+            <th class="px-2 py-2 text-right">1人工当たり</th>
+            <th class="px-2 py-2 text-right">本社工場</th>
+            <th class="px-2 py-2 text-right">第二工場</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.map(r => `
+            <tr class="border-t hover:bg-blue-50">
+              <td class="px-2 py-2 whitespace-nowrap">${escapeHtml(r.date)}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.total_qty)} kg</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtMd(r.total_man_days)}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.record_count}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.record_count > 0 ? trFmtQty(r.qty_per_record) + ' kg' : '－'}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.total_man_days > 0 ? trFmtQty1(r.qty_per_man_day) + ' kg' : '－'}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.honsha_qty)} kg</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.dai2_qty)} kg</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  const ctx = document.getElementById('tra_daily_chart');
+  transportState.charts.daily = new Chart(ctx, {
+    data: {
+      labels: data.map(r => r.date),
+      datasets: [
+        { type:'bar', label:'運搬数量(kg)', data: data.map(r => r.total_qty), backgroundColor:'rgba(16, 185, 129, 0.6)', yAxisID:'y' },
+        { type:'line', label:'1人工当たり(kg/人工)', data: data.map(r => r.total_man_days > 0 ? r.qty_per_man_day : null), borderColor:'rgb(147, 51, 234)', backgroundColor:'rgba(147, 51, 234, 0.2)', yAxisID:'y1', tension:0.2 }
+      ]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      scales: {
+        y: { position:'left', title:{ display:true, text:'運搬数量(kg)' } },
+        y1:{ position:'right', title:{ display:true, text:'1人工当たり(kg/人工)' }, grid:{ drawOnChartArea:false } }
+      }
+    }
+  });
+}
+
+// ---- 月別 ----
+function renderTraMonthly(el, data) {
+  if (data.length === 0) {
+    el.innerHTML = trEmptyPanel('月別データがありません');
+    return;
+  }
+  el.innerHTML = `
+    <div class="bg-white rounded-xl shadow-sm p-4">
+      <h3 class="font-semibold mb-2">月別運搬数量</h3>
+      <div class="relative" style="height:260px"><canvas id="tra_monthly_chart"></canvas></div>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm p-2 md:p-4 overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-100">
+          <tr class="text-left">
+            <th class="px-2 py-2">月</th>
+            <th class="px-2 py-2 text-right">運搬数量</th>
+            <th class="px-2 py-2 text-right">運搬人工</th>
+            <th class="px-2 py-2 text-right">運搬件数</th>
+            <th class="px-2 py-2 text-right">1件当たり</th>
+            <th class="px-2 py-2 text-right">1人工当たり</th>
+            <th class="px-2 py-2 text-right">本社工場</th>
+            <th class="px-2 py-2 text-right">第二工場</th>
+            <th class="px-2 py-2 text-right" title="(当月 - 前月) / 前月 × 100">前月比<br><span class="text-xs font-normal text-gray-500">増減率</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.map(r => `
+            <tr class="border-t hover:bg-blue-50">
+              <td class="px-2 py-2 whitespace-nowrap">${escapeHtml(r.ym)}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.total_qty)} kg</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtMd(r.total_man_days)}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.record_count}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.record_count > 0 ? trFmtQty(r.qty_per_record) + ' kg' : '－'}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.total_man_days > 0 ? trFmtQty1(r.qty_per_man_day) + ' kg' : '－'}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.honsha_qty)} kg</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.dai2_qty)} kg</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtChange(r.prev_month_change)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  const ctx = document.getElementById('tra_monthly_chart');
+  transportState.charts.monthly = new Chart(ctx, {
+    type:'bar',
+    data: {
+      labels: data.map(r => r.ym),
+      datasets: [
+        { label:'本社工場(kg)', data: data.map(r => r.honsha_qty), backgroundColor:'rgba(59, 130, 246, 0.7)' },
+        { label:'第二工場(kg)', data: data.map(r => r.dai2_qty), backgroundColor:'rgba(168, 85, 247, 0.7)' }
+      ]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      scales: { x:{ stacked:true }, y:{ stacked:true, title:{ display:true, text:'運搬数量(kg)' } } }
+    }
+  });
+}
+
+// ---- 年別 ----
+function renderTraYearly(el, yearly, monthly) {
+  if (yearly.length === 0 && monthly.length === 0) {
+    el.innerHTML = trEmptyPanel('年別データがありません');
+    return;
+  }
+  el.innerHTML = `
+    <div class="bg-white rounded-xl shadow-sm p-2 md:p-4 overflow-x-auto">
+      <h3 class="font-semibold mb-2">年別集計</h3>
+      <table class="w-full text-sm">
+        <thead class="bg-gray-100">
+          <tr class="text-left">
+            <th class="px-2 py-2">年</th>
+            <th class="px-2 py-2 text-right">運搬数量</th>
+            <th class="px-2 py-2 text-right">運搬人工</th>
+            <th class="px-2 py-2 text-right">運搬件数</th>
+            <th class="px-2 py-2 text-right">1件当たり</th>
+            <th class="px-2 py-2 text-right">1人工当たり</th>
+            <th class="px-2 py-2 text-right">本社工場</th>
+            <th class="px-2 py-2 text-right">第二工場</th>
+            <th class="px-2 py-2 text-right" title="(当年 - 前年) / 前年 × 100">前年比<br><span class="text-xs font-normal text-gray-500">増減率</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          ${yearly.length === 0 ? `<tr><td class="px-2 py-4 text-center text-gray-500" colspan="9">年別データなし</td></tr>` : yearly.map(r => `
+            <tr class="border-t hover:bg-blue-50">
+              <td class="px-2 py-2">${escapeHtml(r.year)}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.total_qty)} kg</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtMd(r.total_man_days)}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.record_count}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.record_count > 0 ? trFmtQty(r.qty_per_record) + ' kg' : '－'}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.total_man_days > 0 ? trFmtQty1(r.qty_per_man_day) + ' kg' : '－'}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.honsha_qty)} kg</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.dai2_qty)} kg</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtChange(r.prev_year_change)}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="bg-white rounded-xl shadow-sm p-4">
+      <h3 class="font-semibold mb-2">月別推移</h3>
+      <div class="relative" style="height:260px"><canvas id="tra_yearly_chart"></canvas></div>
+    </div>
+  `;
+  if (monthly.length > 0) {
+    const ctx = document.getElementById('tra_yearly_chart');
+    transportState.charts.yearly = new Chart(ctx, {
+      data: {
+        labels: monthly.map(r => r.ym),
+        datasets: [
+          { type:'bar', label:'運搬数量(kg)', data: monthly.map(r => r.total_qty), backgroundColor:'rgba(16, 185, 129, 0.6)', yAxisID:'y' },
+          { type:'line', label:'運搬人工', data: monthly.map(r => r.total_man_days), borderColor:'rgb(59, 130, 246)', backgroundColor:'rgba(59, 130, 246, 0.2)', yAxisID:'y1', tension:0.2 },
+          { type:'line', label:'1人工当たり(kg/人工)', data: monthly.map(r => r.total_man_days > 0 ? r.qty_per_man_day : null), borderColor:'rgb(147, 51, 234)', backgroundColor:'rgba(147, 51, 234, 0.2)', yAxisID:'y2', tension:0.2, borderDash:[5,3] }
+        ]
+      },
+      options: {
+        responsive:true, maintainAspectRatio:false,
+        scales: {
+          y:  { position:'left',  title:{ display:true, text:'運搬数量(kg)' } },
+          y1: { position:'right', title:{ display:true, text:'運搬人工' }, grid:{ drawOnChartArea:false } },
+          y2: { display:false }
+        }
+      }
+    });
+  }
+}
+
+// ---- 人員別 ----
+function renderTraWorkers(el, data) {
+  if (data.length === 0) {
+    el.innerHTML = trEmptyPanel('人員別データがありません');
+    return;
+  }
+  el.innerHTML = `
+    <div class="bg-white rounded-xl shadow-sm p-4">
+      <h3 class="font-semibold mb-2">人員別運搬数量 (Top 20)</h3>
+      <div class="relative" style="height:280px"><canvas id="tra_workers_chart"></canvas></div>
+    </div>
+    <div class="bg-white rounded-xl shadow-sm p-2 md:p-4 overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-100">
+          <tr class="text-left">
+            <th class="px-2 py-2">運搬人員</th>
+            <th class="px-2 py-2 text-right">担当人工</th>
+            <th class="px-2 py-2 text-right">担当件数</th>
+            <th class="px-2 py-2 text-right">担当日数</th>
+            <th class="px-2 py-2 text-right">担当運搬数量</th>
+            <th class="px-2 py-2 text-right">1人工当たり</th>
+            <th class="px-2 py-2 text-right">本社工場</th>
+            <th class="px-2 py-2 text-right">第二工場</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${data.map(r => `
+            <tr class="border-t hover:bg-blue-50">
+              <td class="px-2 py-2 whitespace-nowrap font-medium">${escapeHtml(r.worker_name)}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtMd(r.total_man_days)}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.record_count}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.days}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.total_qty)} kg</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${r.total_man_days > 0 ? trFmtQty1(r.qty_per_man_day) + ' kg' : '－'}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.honsha_qty)} kg</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtQty(r.dai2_qty)} kg</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  const top = data.slice(0, 20);
+  const ctx = document.getElementById('tra_workers_chart');
+  transportState.charts.workers = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: top.map(r => r.worker_name),
+      datasets: [{ label:'担当運搬数量(kg)', data: top.map(r => r.total_qty), backgroundColor:'rgba(16, 185, 129, 0.7)' }]
+    },
+    options: { responsive:true, maintainAspectRatio:false, indexAxis: 'y', scales:{ x:{ title:{ display:true, text:'運搬数量(kg)' } } } }
+  });
+}
+
+function trEmptyPanel(msg) {
+  return `<div class="bg-white rounded-xl shadow-sm p-10 text-center text-gray-500">
+    <i class="fas fa-inbox text-3xl"></i><p class="mt-2">${escapeHtml(msg)}</p>
+  </div>`;
+}
+
+// ============================================================================
+//  運搬用 CSV / PDF 出力 (加工用 exportCsvUnified / exportPdfUnified は変更せず、
+//  完全に別関数として実装。日本語対応の PDF フォントロード関数だけは既存の
+//  ensureNotoSansJP を再利用する。)
+// ============================================================================
+
+function trCsvEscape(v) {
+  if (v == null) return '';
+  const s = String(v);
+  if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+function trCsvDownload(rows, filename) {
+  const csv = rows.map(row => row.map(trCsvEscape).join(',')).join('\r\n');
+  const bom = '\uFEFF';
+  const blob = new Blob([bom + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+// CSV 用: 数値をそのまま (3桁区切りなし) 出力。Excel で数値として扱えるようにする。
+// digits: 表示する最大小数桁数 (未指定=3)。末尾の 0 と不要な "." は削除する。
+// 例: 8250 → "8250" / 8250.5 → "8250.5" / 8250.125 → "8250.125" / 8250.500 → "8250.5"
+function trCsvNum(n, digits = 3) {
+  const v = Number(n);
+  if (!isFinite(v)) return '';
+  // toFixed で丸めてから末尾の 0 と小数点を削除
+  let s = v.toFixed(Math.max(0, Math.min(10, digits)));
+  if (s.indexOf('.') >= 0) {
+    s = s.replace(/0+$/, '').replace(/\.$/, '');
+  }
+  return s;
+}
+// 人工は小数第3位まで、末尾0は保持しない (例: 1 → "1" / 0.5 → "0.5" / 1.125 → "1.125")
+function trCsvMd(n) { return trCsvNum(n, 3); }
+// 割合(%)など小数1桁固定が望ましいもの用 (前月比・1人工当たりなど)
+function trCsvNum1(n) { return trCsvNum(n, 1); }
+
+// フィルタ条件を人間可読な文字列に変換
+function trFilterLabel(params) {
+  const parts = [];
+  if (params.year) parts.push(`年:${params.year}`);
+  if (params.dateFrom || params.dateTo) parts.push(`期間:${params.dateFrom || '～'}〜${params.dateTo || '～'}`);
+  parts.push(`工場:${params.factory === 'all' || !params.factory ? '全工場合算' : params.factory}`);
+  return parts.join(' / ');
+}
+
+// ---- CSV: 一覧 ----
+function exportTransportListCsv(records, filters) {
+  const rows = [];
+  rows.push([`運搬実績一覧 出力条件`, trFilterLabel(filters)]);
+  rows.push([]);
+  rows.push(['日付','工場','運搬人員(人工)','合計人工','運搬車両','運搬数量(kg)','1人工当たり運搬数量(kg/人工)']);
+  let totQty = 0, totMd = 0;
+  for (const r of records) {
+    const workersStr = (r.workers || []).map(w => `${w.worker_name}(${trFmtMd(w.man_days)})`).join('; ');
+    const md = Number(r.total_man_days) || 0;
+    const qty = Number(r.transport_quantity_kg) || 0;
+    const perMd = md > 0 ? qty / md : '';
+    rows.push([r.transport_date, r.factory, workersStr, trCsvMd(md), r.vehicle, trCsvNum(qty), perMd !== '' ? trCsvNum(perMd, 1) : '']);
+    totQty += qty; totMd += md;
+  }
+  rows.push([]);
+  rows.push(['合計','','', trCsvMd(totMd),'', trCsvNum(totQty), totMd > 0 ? trCsvNum(totQty / totMd, 1) : '']);
+  const fn = `運搬実績一覧_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}.csv`;
+  trCsvDownload(rows, fn);
+}
+
+// ---- CSV: 各分析 ----
+function exportTransportAnalysisCsv(kind, data, params, monthly) {
+  const rows = [];
+  const filterStr = trFilterLabel(params);
+  if (kind === 'daily') {
+    rows.push(['運搬数量分析(日別) 出力条件', filterStr]);
+    rows.push([]);
+    rows.push(['日付','運搬数量(kg)','運搬人工','運搬件数','1件当たり運搬数量(kg)','1人工当たり運搬数量(kg/人工)','本社工場運搬数量(kg)','第二工場運搬数量(kg)']);
+    let tq=0, tmd=0, trc=0, thh=0, td2=0;
+    for (const r of data) {
+      rows.push([r.date, trCsvNum(r.total_qty), trCsvMd(r.total_man_days), r.record_count,
+        r.record_count > 0 ? trCsvNum(r.qty_per_record) : '',
+        r.total_man_days > 0 ? trCsvNum(r.qty_per_man_day, 1) : '',
+        trCsvNum(r.honsha_qty), trCsvNum(r.dai2_qty)]);
+      tq += Number(r.total_qty)||0; tmd += Number(r.total_man_days)||0; trc += Number(r.record_count)||0;
+      thh += Number(r.honsha_qty)||0; td2 += Number(r.dai2_qty)||0;
+    }
+    rows.push([]);
+    rows.push(['合計', trCsvNum(tq), trCsvMd(tmd), trc,
+      trc > 0 ? trCsvNum(tq / trc) : '',
+      tmd > 0 ? trCsvNum(tq / tmd, 1) : '',
+      trCsvNum(thh), trCsvNum(td2)]);
+  } else if (kind === 'monthly') {
+    rows.push(['運搬数量分析(月別) 出力条件', filterStr]);
+    rows.push([]);
+    rows.push(['月','運搬数量(kg)','運搬人工','運搬件数','1件当たり運搬数量(kg)','1人工当たり運搬数量(kg/人工)','本社工場運搬数量(kg)','第二工場運搬数量(kg)','前月比増減率(%)']);
+    let tq=0, tmd=0, trc=0, thh=0, td2=0;
+    for (const r of data) {
+      rows.push([r.ym, trCsvNum(r.total_qty), trCsvMd(r.total_man_days), r.record_count,
+        r.record_count > 0 ? trCsvNum(r.qty_per_record) : '',
+        r.total_man_days > 0 ? trCsvNum(r.qty_per_man_day, 1) : '',
+        trCsvNum(r.honsha_qty), trCsvNum(r.dai2_qty),
+        r.prev_month_change == null ? '－' : (r.prev_month_change >= 0 ? '+' : '') + trCsvNum(r.prev_month_change * 100, 1) + '%']);
+      tq += Number(r.total_qty)||0; tmd += Number(r.total_man_days)||0; trc += Number(r.record_count)||0;
+      thh += Number(r.honsha_qty)||0; td2 += Number(r.dai2_qty)||0;
+    }
+    rows.push([]);
+    rows.push(['合計', trCsvNum(tq), trCsvMd(tmd), trc, trc > 0 ? trCsvNum(tq / trc) : '', tmd > 0 ? trCsvNum(tq / tmd, 1) : '', trCsvNum(thh), trCsvNum(td2), '']);
+  } else if (kind === 'yearly') {
+    rows.push(['運搬数量分析(年別) 出力条件', filterStr]);
+    rows.push([]);
+    rows.push(['年','運搬数量(kg)','運搬人工','運搬件数','1件当たり運搬数量(kg)','1人工当たり運搬数量(kg/人工)','本社工場運搬数量(kg)','第二工場運搬数量(kg)','前年比増減率(%)']);
+    for (const r of data) {
+      rows.push([r.year, trCsvNum(r.total_qty), trCsvMd(r.total_man_days), r.record_count,
+        r.record_count > 0 ? trCsvNum(r.qty_per_record) : '',
+        r.total_man_days > 0 ? trCsvNum(r.qty_per_man_day, 1) : '',
+        trCsvNum(r.honsha_qty), trCsvNum(r.dai2_qty),
+        r.prev_year_change == null ? '－' : (r.prev_year_change >= 0 ? '+' : '') + trCsvNum(r.prev_year_change * 100, 1) + '%']);
+    }
+    if (Array.isArray(monthly) && monthly.length > 0) {
+      rows.push([]);
+      rows.push(['月別推移']);
+      rows.push(['月','運搬数量(kg)','運搬人工','1人工当たり運搬数量(kg/人工)']);
+      for (const r of monthly) {
+        rows.push([r.ym, trCsvNum(r.total_qty), trCsvMd(r.total_man_days), r.total_man_days > 0 ? trCsvNum(r.qty_per_man_day, 1) : '']);
+      }
+    }
+  } else if (kind === 'workers') {
+    rows.push(['運搬数量分析(人員別) 出力条件', filterStr]);
+    rows.push([]);
+    rows.push(['運搬人員','担当人工','担当件数','担当日数','担当運搬数量(kg)','1人工当たり運搬数量(kg/人工)','本社工場運搬数量(kg)','第二工場運搬数量(kg)']);
+    let tq=0, tmd=0, thh=0, td2=0;
+    for (const r of data) {
+      rows.push([r.worker_name, trCsvMd(r.total_man_days), r.record_count, r.days, trCsvNum(r.total_qty),
+        r.total_man_days > 0 ? trCsvNum(r.qty_per_man_day, 1) : '',
+        trCsvNum(r.honsha_qty), trCsvNum(r.dai2_qty)]);
+      tq += Number(r.total_qty)||0; tmd += Number(r.total_man_days)||0;
+      thh += Number(r.honsha_qty)||0; td2 += Number(r.dai2_qty)||0;
+    }
+    rows.push([]);
+    rows.push(['合計', trCsvMd(tmd), '', '', trCsvNum(tq), tmd > 0 ? trCsvNum(tq / tmd, 1) : '', trCsvNum(thh), trCsvNum(td2)]);
+  }
+  const label = ({daily:'日別', monthly:'月別', yearly:'年別', workers:'人員別'})[kind];
+  const fn = `運搬数量分析_${label}_${params.dateFrom || params.year || '全期間'}_${params.factory === 'all' ? '全体合算' : params.factory}.csv`;
+  trCsvDownload(rows, fn);
+}
+
+// ---- PDF ボタン用: 二重クリック防止 + 非同期完了待ち + エラー通知ラッパー ----
+// PDF ボタンの onclick から呼び出す。fn は Promise を返す async 関数。
+// btnEl は disabled 化する対象のボタン要素。
+async function trRunPdfExport(btnEl, fn) {
+  if (btnEl && btnEl.disabled) return;
+  const originalHtml = btnEl ? btnEl.innerHTML : null;
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>出力中…';
+  }
+  try {
+    await fn();
+  } catch (e) {
+    // trPdfInit 内で既に alert を出しているケース (フォント読込失敗) と、
+    // その他の予期しない例外を切り分けて通知する。
+    const already = e && String(e.message || '').includes('font');
+    console.error('[trRunPdfExport] PDF出力エラー', e);
+    if (!already) alert('PDF出力に失敗しました: ' + (e && e.message ? e.message : String(e)));
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      if (originalHtml != null) btnEl.innerHTML = originalHtml;
+    }
+  }
+}
+
+// ---- PDF: 共通ヘッダー/フォント ----
+// 既存加工PDFで実績のある _loadPdfJapaneseFont / PDF_FONT_NAME をそのまま再利用する。
+// (旧実装は存在しない関数 `ensureNotoSansJP` を typeof で参照し常に false 分岐に落ち、
+//  フォント未登録のまま jsPDF 標準フォントで描画 → 日本語が全面文字化けしていた。)
+// 失敗時は暗黙フォールバックせず、必ず alert + throw で中断する。
+async function trPdfInit() {
+  if (!window.jspdf || !window.jspdf.jsPDF) {
+    const msg = 'PDFライブラリの読込に失敗しました (jsPDF)';
+    alert(msg); throw new Error(msg);
+  }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+  try {
+    await _loadPdfJapaneseFont(doc);
+  } catch (e) {
+    const msg = 'PDF用日本語フォントの読み込みに失敗しました。画面を再読み込みして、もう一度お試しください。';
+    console.error('[trPdfInit] font load failed', e);
+    alert(msg + '\n\n' + (e && e.message ? e.message : e));
+    throw e;
+  }
+  // フォント登録確認: getFontList() に PDF_FONT_NAME が含まれない場合は
+  // 文字化けPDFを出さないよう中断する
+  try {
+    const list = typeof doc.getFontList === 'function' ? doc.getFontList() : null;
+    const registered = !!(list && list[PDF_FONT_NAME]);
+    if (!registered) {
+      const msg = 'PDF用日本語フォントの読み込みに失敗しました。画面を再読み込みして、もう一度お試しください。';
+      console.error('[trPdfInit] font not registered. getFontList=', list);
+      alert(msg);
+      throw new Error('font not registered: ' + PDF_FONT_NAME);
+    }
+  } catch (e) {
+    if (e && String(e.message || '').startsWith('font not registered')) throw e;
+    // getFontList 自体が未実装の古い jsPDF ではスキップ (実運用の jsPDF 2.5.1 では実装済)
+    console.warn('[trPdfInit] getFontList not usable, skipping strict check', e);
+  }
+  doc.setFont(PDF_FONT_NAME, 'normal');
+  return doc;
+}
+// PDF 用: 3桁区切り + 小数最大 digits 桁 (末尾0は削除)
+// digits を明示的に指定した場合は minimumFractionDigits = maximumFractionDigits = digits で「固定桁」表示
+// (人工の 3桁固定、割合の 1桁固定など)。未指定は最大3桁で末尾0削除 (運搬数量の変動小数用)
+// 例: trPdfNum(8250)      → "8,250"
+//     trPdfNum(8250.5)    → "8,250.5"
+//     trPdfNum(1234.125)  → "1,234.125"
+//     trPdfNum(1, 3)      → "1.000"  (人工など固定桁)
+//     trPdfNum(1.5, 1)    → "1.5"    (1人工当たりなど固定桁)
+function trPdfNum(n, digits) {
+  const v = Number(n);
+  if (!isFinite(v)) return '';
+  if (typeof digits === 'number') {
+    // 明示的に固定桁指定 (既存の 3桁/1桁 用途と互換)
+    return v.toLocaleString('ja-JP', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  }
+  // 変動小数 (最大 3 桁、末尾 0 削除) — 運搬数量の表示用
+  return v.toLocaleString('ja-JP', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
+}
+
+// PDF 見出し + フィルタ条件表示
+// autoTable 呼出後に jsPDF のカレントフォントが標準フォントへ戻る場合があるため、
+// 各テキスト描画前に必ず PDF_FONT_NAME を setFont し直す。
+function trPdfHeader(doc, title, params) {
+  doc.setFont(PDF_FONT_NAME, 'normal');
+  doc.setFontSize(14);
+  doc.setTextColor(0, 0, 0);
+  doc.text(title, 40, 40);
+  doc.setFont(PDF_FONT_NAME, 'normal');
+  doc.setFontSize(10);
+  doc.text(`条件: ${trFilterLabel(params)}`, 40, 58);
+  doc.setFont(PDF_FONT_NAME, 'normal');
+  doc.text(`出力日時: ${dayjs().format('YYYY-MM-DD HH:mm')}`, 40, 72);
+}
+
+// PDF サマリ (5 KPI) を1行の表として描く
+function trPdfSummary(doc, startY, summary) {
+  doc.autoTable({
+    startY,
+    head: [summary.map(s => s.label)],
+    body: [summary.map(s => s.value)],
+    theme: 'grid',
+    styles:      { font: PDF_FONT_NAME, fontStyle: 'normal', fontSize: 9, halign: 'center' },
+    headStyles:  { font: PDF_FONT_NAME, fontStyle: 'normal', fillColor: [59, 130, 246], textColor: 255 },
+    bodyStyles:  { font: PDF_FONT_NAME, fontStyle: 'normal', textColor: [0, 0, 0] }
+  });
+  return doc.lastAutoTable.finalY + 10;
+}
+
+function trBuildKpiSummary(data) {
+  const totQty = data.reduce((s, r) => s + (Number(r.total_qty) || 0), 0);
+  const totMd = data.reduce((s, r) => s + (Number(r.total_man_days) || 0), 0);
+  const totRc = data.reduce((s, r) => s + (Number(r.record_count) || 0), 0);
+  return [
+    { label: '運搬数量(kg)',    value: trPdfNum(totQty) },
+    { label: '運搬人工',        value: trPdfNum(totMd, 3) },
+    { label: '運搬件数',        value: String(totRc) },
+    { label: '1件当たり(kg)',   value: totRc > 0 ? trPdfNum(totQty / totRc) : '－' },
+    { label: '1人工当たり(kg/人工)', value: totMd > 0 ? trPdfNum(totQty / totMd, 1) : '－' }
+  ];
+}
+
+// ---- PDF: 一覧 ----
+async function exportTransportListPdf(records, filters) {
+  const doc = await trPdfInit();
+  trPdfHeader(doc, '運搬実績一覧', filters);
+  const totQty = records.reduce((s, r) => s + (Number(r.transport_quantity_kg) || 0), 0);
+  const totMd = records.reduce((s, r) => s + (Number(r.total_man_days) || 0), 0);
+  const summary = [
+    { label: '運搬件数', value: String(records.length) },
+    { label: '運搬数量(kg)', value: trPdfNum(totQty) },
+    { label: '人工合計', value: trPdfNum(totMd, 3) },
+    { label: '1人工当たり(kg/人工)', value: totMd > 0 ? trPdfNum(totQty / totMd, 1) : '－' }
+  ];
+  const y = trPdfSummary(doc, 90, summary);
+  const body = records.map(r => {
+    const md = Number(r.total_man_days) || 0;
+    const qty = Number(r.transport_quantity_kg) || 0;
+    return [
+      r.transport_date, r.factory,
+      (r.workers||[]).map(w => `${w.worker_name}(${trFmtMd(w.man_days)})`).join(', '),
+      trPdfNum(md, 3), r.vehicle,
+      trPdfNum(qty), md > 0 ? trPdfNum(qty / md, 1) : '－'
+    ];
+  });
+  doc.autoTable({
+    startY: y,
+    head: [['日付','工場','運搬人員(人工)','合計人工','運搬車両','運搬数量(kg)','1人工当たり(kg/人工)']],
+    body,
+    theme: 'grid',
+    styles:     { font: PDF_FONT_NAME, fontStyle: 'normal', fontSize: 8, overflow: 'linebreak', valign: 'middle' },
+    headStyles: { font: PDF_FONT_NAME, fontStyle: 'normal', fillColor: [59, 130, 246], textColor: 255, halign: 'center' },
+    bodyStyles: { font: PDF_FONT_NAME, fontStyle: 'normal', textColor: [0, 0, 0] },
+    columnStyles: {
+      0: { cellWidth: 68 }, 1: { cellWidth: 55 }, 2: { cellWidth: 200 },
+      3: { cellWidth: 55, halign: 'right' }, 4: { cellWidth: 100 },
+      5: { cellWidth: 75, halign: 'right' }, 6: { cellWidth: 80, halign: 'right' }
+    },
+    showHead: 'everyPage',
+    margin: { left: 40, right: 40 }
+  });
+  const fn = `運搬実績一覧_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}.pdf`;
+  doc.save(fn);
+}
+
+// ---- PDF: 各分析 ----
+async function exportTransportAnalysisPdf(kind, data, params, monthly) {
+  const doc = await trPdfInit();
+  const label = ({daily:'日別', monthly:'月別', yearly:'年別', workers:'人員別'})[kind];
+  trPdfHeader(doc, `運搬数量分析（${label}）`, params);
+  const summary = (kind === 'workers')
+    ? [
+        { label: '登録人員数', value: `${data.length} 人` },
+        { label: '運搬数量(kg)', value: trPdfNum(data.reduce((s,r)=>s+(Number(r.total_qty)||0),0)) },
+        { label: '運搬人工', value: trPdfNum(data.reduce((s,r)=>s+(Number(r.total_man_days)||0),0), 3) },
+        { label: '1人工当たり(kg/人工)', value: (() => { const q = data.reduce((s,r)=>s+(Number(r.total_qty)||0),0); const md = data.reduce((s,r)=>s+(Number(r.total_man_days)||0),0); return md > 0 ? trPdfNum(q/md, 1) : '－'; })() }
+      ]
+    : trBuildKpiSummary(data);
+  const y = trPdfSummary(doc, 90, summary);
+
+  let head, body, colStyles;
+  if (kind === 'daily') {
+    head = [['日付','運搬数量(kg)','運搬人工','運搬件数','1件当たり(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)']];
+    body = data.map(r => [
+      r.date, trPdfNum(r.total_qty), trPdfNum(r.total_man_days, 3), String(r.record_count),
+      r.record_count > 0 ? trPdfNum(r.qty_per_record) : '－',
+      r.total_man_days > 0 ? trPdfNum(r.qty_per_man_day, 1) : '－',
+      trPdfNum(r.honsha_qty), trPdfNum(r.dai2_qty)
+    ]);
+    colStyles = { 1:{halign:'right'},2:{halign:'right'},3:{halign:'right'},4:{halign:'right'},5:{halign:'right'},6:{halign:'right'},7:{halign:'right'} };
+  } else if (kind === 'monthly') {
+    head = [['月','運搬数量(kg)','運搬人工','運搬件数','1件当たり(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)','前月比(増減率)']];
+    body = data.map(r => [
+      r.ym, trPdfNum(r.total_qty), trPdfNum(r.total_man_days, 3), String(r.record_count),
+      r.record_count > 0 ? trPdfNum(r.qty_per_record) : '－',
+      r.total_man_days > 0 ? trPdfNum(r.qty_per_man_day, 1) : '－',
+      trPdfNum(r.honsha_qty), trPdfNum(r.dai2_qty),
+      r.prev_month_change == null ? '－' : (r.prev_month_change >= 0 ? '+' : '') + trPdfNum(r.prev_month_change * 100, 1) + '%'
+    ]);
+    colStyles = { 1:{halign:'right'},2:{halign:'right'},3:{halign:'right'},4:{halign:'right'},5:{halign:'right'},6:{halign:'right'},7:{halign:'right'},8:{halign:'right'} };
+  } else if (kind === 'yearly') {
+    head = [['年','運搬数量(kg)','運搬人工','運搬件数','1件当たり(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)','前年比(増減率)']];
+    body = data.map(r => [
+      r.year, trPdfNum(r.total_qty), trPdfNum(r.total_man_days, 3), String(r.record_count),
+      r.record_count > 0 ? trPdfNum(r.qty_per_record) : '－',
+      r.total_man_days > 0 ? trPdfNum(r.qty_per_man_day, 1) : '－',
+      trPdfNum(r.honsha_qty), trPdfNum(r.dai2_qty),
+      r.prev_year_change == null ? '－' : (r.prev_year_change >= 0 ? '+' : '') + trPdfNum(r.prev_year_change * 100, 1) + '%'
+    ]);
+    colStyles = { 1:{halign:'right'},2:{halign:'right'},3:{halign:'right'},4:{halign:'right'},5:{halign:'right'},6:{halign:'right'},7:{halign:'right'},8:{halign:'right'} };
+  } else if (kind === 'workers') {
+    head = [['運搬人員','担当人工','担当件数','担当日数','担当運搬数量(kg)','1人工当たり(kg/人工)','本社工場(kg)','第二工場(kg)']];
+    body = data.map(r => [
+      r.worker_name, trPdfNum(r.total_man_days, 3), String(r.record_count), String(r.days),
+      trPdfNum(r.total_qty),
+      r.total_man_days > 0 ? trPdfNum(r.qty_per_man_day, 1) : '－',
+      trPdfNum(r.honsha_qty), trPdfNum(r.dai2_qty)
+    ]);
+    colStyles = { 1:{halign:'right'},2:{halign:'right'},3:{halign:'right'},4:{halign:'right'},5:{halign:'right'},6:{halign:'right'},7:{halign:'right'} };
+  }
+
+  doc.autoTable({
+    startY: y, head, body,
+    theme: 'grid',
+    styles:     { font: PDF_FONT_NAME, fontStyle: 'normal', fontSize: 8, overflow: 'linebreak', valign: 'middle' },
+    headStyles: { font: PDF_FONT_NAME, fontStyle: 'normal', fillColor: [59, 130, 246], textColor: 255, halign: 'center' },
+    bodyStyles: { font: PDF_FONT_NAME, fontStyle: 'normal', textColor: [0, 0, 0] },
+    columnStyles: colStyles,
+    showHead: 'everyPage',
+    margin: { left: 40, right: 40 }
+  });
+
+  // 年別のときは月別推移表も追加
+  if (kind === 'yearly' && Array.isArray(monthly) && monthly.length > 0) {
+    const y2 = doc.lastAutoTable.finalY + 15;
+    // autoTable 後は jsPDF カレントフォントが標準に戻る場合があるため setFont を再指定
+    doc.setFont(PDF_FONT_NAME, 'normal');
+    doc.setFontSize(12);
+    doc.setTextColor(0, 0, 0);
+    doc.text('月別推移', 40, y2);
+    doc.autoTable({
+      startY: y2 + 6,
+      head: [['月','運搬数量(kg)','運搬人工','1人工当たり(kg/人工)']],
+      body: monthly.map(r => [ r.ym, trPdfNum(r.total_qty), trPdfNum(r.total_man_days, 3), r.total_man_days > 0 ? trPdfNum(r.qty_per_man_day, 1) : '－' ]),
+      theme: 'grid',
+      styles:     { font: PDF_FONT_NAME, fontStyle: 'normal', fontSize: 8, overflow: 'linebreak', valign: 'middle' },
+      headStyles: { font: PDF_FONT_NAME, fontStyle: 'normal', fillColor: [16, 185, 129], textColor: 255, halign: 'center' },
+      bodyStyles: { font: PDF_FONT_NAME, fontStyle: 'normal', textColor: [0, 0, 0] },
+      columnStyles: { 1:{halign:'right'},2:{halign:'right'},3:{halign:'right'} },
+      showHead: 'everyPage',
+      margin: { left: 40, right: 40 }
+    });
+  }
+
+  const fn = `運搬数量分析_${label}_${params.dateFrom || params.year || '全期間'}_${params.factory === 'all' ? '全体合算' : params.factory}.pdf`;
+  doc.save(fn);
 }
 
 // 公開: ログイン画面の sampleモードボタンから呼び出す

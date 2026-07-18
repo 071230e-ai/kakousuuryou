@@ -191,11 +191,46 @@ npx wrangler pages deploy dist --project-name murata-tekkin-processing --branch 
 - 監査ログ（誰がいつ編集したかの履歴）
 - スマホでのオフライン入力（PWA 化）
 
+## 運搬数量機能（新規追加・加工数量とは完全独立）
+
+### 概要
+既存の「加工数量」機能とは業務上まったく別の機能として、「運搬数量」を追加しました。加工数量の入力・一覧・分析・CSV・PDF・API・DB には一切変更を加えていません。運搬分析でも加工データは参照しません。
+
+### 追加した画面（ナビゲーション末尾に3項目追加）
+- **運搬数量入力**：日付・工場・運搬人員/人工（複数行）・運搬車両（自由入力）・運搬数量(kg)
+- **運搬実績一覧**：期間/工場/人員/車両（部分一致）で絞り込み、合計・件数・1人工当たり運搬数量を表示、編集/削除、CSV/PDF出力
+- **運搬数量分析**：日別／月別／年別／人員別の4タブ、工場切替（全工場合算・本社工場・第二工場）、Chart.js グラフ、CSV/PDF出力
+
+### 追加した DB テーブル（マイグレーション `migrations/0005_transport_records.sql`）
+- `transport_records` (id, transport_date, factory CHECK IN ('本社工場','第二工場'), vehicle, transport_quantity_kg REAL CHECK>0, created_by FK, created_at, updated_at)
+- `transport_record_workers` (id, transport_record_id FK CASCADE, worker_id FK SET NULL, worker_name, man_days REAL CHECK>0, UNIQUE(transport_record_id, worker_name))
+
+### 追加した API
+- CRUD: `GET/POST /api/transport-records`, `GET/PUT/DELETE /api/transport-records/:id`
+- サジェスト: `GET /api/transport-records/vehicles`
+- 分析: `GET /api/analytics/transport/daily|monthly|yearly|workers`
+
+### 人員別按分方式
+複数人運搬時は「記録の運搬数量 × 対象人員の人工 ÷ 記録の合計人工」で按分。按分合計＝全体合計となることを確認済。
+
+### 権限（既存加工と同一）
+- 一覧・個別・編集：admin は全件、一般ユーザーは自分の登録のみ
+- 分析：全ユーザー閲覧可
+- 削除：admin のみ（一般ユーザーは 403）
+
+### 保存処理の一貫性 (POST / PUT)
+- **POST（新規登録）**: 運搬記録本体を単発で INSERT し `last_row_id` を得た後、運搬人員を `db.batch()` で登録する。**厳密な単一トランザクションではない**。人員登録が失敗した場合は本体を **補償 DELETE** することで、部分的なゴミレコードが残らないようにする（compensating transaction）。補償 DELETE 自体が失敗した場合は HTTP 500 に `recordId` と両方のエラー詳細を含めて返却し、管理者が整合性を確認できるようにする。
+- **PUT（更新）**: 本体 UPDATE・既存人員 DELETE・新規人員 INSERT を **単一の `db.batch()`** にまとめて実行する。D1 は `batch()` の全ステートメントを暗黙の BEGIN/COMMIT で実行し、いずれかが失敗すれば全体を ROLLBACK するため、更新失敗時に元データはバイト単位で保全される（true atomic within `batch()`）。
+- **楽観ロック**: PUT は編集開始時点の `updated_at` を `expected_updated_at` として受け取り、DB の現在値と不一致なら HTTP 409 (`conflict: true`) を返す。フロントは 409 を受けたら「他ユーザーにより更新されています」と警告し、最新データを再取得して編集を再開する。
+
+### 運搬数量の桁数
+DB は REAL 型。入力・API・画面・CSV・PDF いずれでも **小数第3位まで** 保持する。第4位以降は登録時に四捨五入される。CSV は数値としてそのまま出力（末尾の不要な `0` は削除）。画面・PDF は 3桁区切り + 最大小数3桁で末尾 `0` を削除して表示する。
+
 ## デプロイ状況
 - **プラットフォーム**: Cloudflare Pages
-- **ステータス**: ✅ Active
+- **ステータス**: ✅ Active（本番は前バージョン）
 - **プロジェクト名**: `murata-tekkin-processing`
 - **本番ブランチ**: main
-- **本番デプロイ済み機能**: v1.3 man_days 0〜1（前 turn デプロイ済 `6008bb4c`）
-- **プレビューのみ（本番未デプロイ）**: man_days 範囲 0〜2 拡張 (Turn B) / **部位別1人工あたり加工数量** (本 turn 追加)
-- **最終更新**: 2026-05-25 (部位別1人工あたり加工数量 機能追加 / プレビューのみ)
+- **本番デプロイ済み**: `33ef887` （加工月別分析PDFの部位構成比追加まで）
+- **プレビューのみ（本番未デプロイ／GitHub未push）**: **運搬数量機能一式**（本 turn 追加、ユーザー承認待ち）
+- **最終更新**: 2026-07-18 運搬数量機能追加（ローカルのみ）

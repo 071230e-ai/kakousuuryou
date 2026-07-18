@@ -63,3 +63,28 @@ export const PART_LABELS: Record<string, string> = {
 
 export const FACTORIES = ['本社工場', '第二工場'] as const
 export type Factory = typeof FACTORIES[number]
+
+// ============================================================
+// 運搬数量機能 (加工数量とは完全に独立)
+// ============================================================
+
+export interface TransportWorkerEntry {
+  worker_id?: number | null
+  worker_name: string
+  man_days: number
+}
+
+export interface TransportRecord {
+  id: number
+  transport_date: string
+  factory: Factory
+  vehicle: string
+  transport_quantity_kg: number
+  created_by: number | null
+  created_at: string
+  updated_at: string
+  // 中間テーブルから join した派生情報
+  workers?: TransportWorkerEntry[]
+  total_man_days?: number
+  qty_per_man_day?: number
+}
