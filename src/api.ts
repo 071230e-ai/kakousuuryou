@@ -206,10 +206,43 @@ function parseStoredWorkerNames(v: any): string[] {
   return []
 }
 
+// 加工・運搬人工 の正規化 (0以上、小数第3位まで保持、上限なし)
+// staff_count 用の clampManDays とは別。null/未入力は null のまま (保存時)、
+// 表示側で "-" 表示を担うため 0/null を区別する。
+function normalizeProcessTransportMd(v: any): number | null {
+  if (v == null || v === '') return null
+  const n = Number(v)
+  if (!isFinite(n)) return null
+  if (n < 0) return 0
+  // 小数第3位で丸める (浮動小数誤差対策)
+  return Math.round(n * 1000) / 1000
+}
+
+// 1人工あたりの加工・運搬数量 (period-safe version)
+// total_qty / process_transport_man_days が有限かつ md > 0 のときのみ数値を返す
+function calcQtyPerProcessTransportMd(totalQty: any, md: any): number | null {
+  const t = Number(totalQty)
+  const m = Number(md)
+  if (!isFinite(t) || !isFinite(m) || m <= 0) return null
+  const v = t / m
+  if (!isFinite(v)) return null
+  return v
+}
+
 function enrichRecord(r: any) {
   const workers = parseStoredWorkers(r?.workers_json, r?.worker_names)
   const names = workers.map(w => w.name)
-  return { ...r, worker_names: names, workers }
+  // 加工・運搬人工: DBの値は REAL or NULL。表示・計算のため number|null に正規化。
+  const ptMdRaw = r?.process_transport_man_days
+  const ptMd = (ptMdRaw == null) ? null : (isFinite(Number(ptMdRaw)) ? Number(ptMdRaw) : null)
+  const qtyPerPtMd = calcQtyPerProcessTransportMd(r?.total_qty, ptMd)
+  return {
+    ...r,
+    worker_names: names,
+    workers,
+    process_transport_man_days: ptMd,
+    qty_per_process_transport_manday: qtyPerPtMd
+  }
 }
 
 // 一覧取得 (絞り込み)
@@ -278,10 +311,11 @@ api.post('/records', authMiddleware, async (c) => {
   const workerNamesArr = workers.map(w => w.name) // 後方互換用
 
   const trailerCount = Math.max(0, Number(body.trailer_count) || 0)
+  const processTransportMd = normalizeProcessTransportMd(body.process_transport_man_days)
   const result = await c.env.DB.prepare(`
     INSERT INTO processing_records
-    (date, factory, staff_count, foundation_qty, base_qty, column_qty, beam_qty, fukashi_qty, slab_qty, doma_qty, civil_qty, wooden_qty, other_qty, total_qty, qty_per_person, note, created_by, worker_names, workers_json, trailer_count)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (date, factory, staff_count, foundation_qty, base_qty, column_qty, beam_qty, fukashi_qty, slab_qty, doma_qty, civil_qty, wooden_qty, other_qty, total_qty, qty_per_person, note, created_by, worker_names, workers_json, trailer_count, process_transport_man_days)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     body.date, body.factory, staffCount,
     Number(body.foundation_qty) || 0, Number(body.base_qty) || 0, Number(body.column_qty) || 0,
@@ -290,7 +324,8 @@ api.post('/records', authMiddleware, async (c) => {
     Number(body.other_qty) || 0, total_qty, qty_per_person, body.note || null, user.id,
     workerNamesArr.length ? JSON.stringify(workerNamesArr) : null,
     workers.length ? JSON.stringify(workers) : null,
-    trailerCount
+    trailerCount,
+    processTransportMd
   ).run()
 
   const recordId = Number(result.meta.last_row_id)
@@ -319,11 +354,13 @@ api.put('/records/:id', authMiddleware, async (c) => {
   const workerNamesArr = workers.map(w => w.name)
 
   const trailerCount = Math.max(0, Number(body.trailer_count) || 0)
+  const processTransportMd = normalizeProcessTransportMd(body.process_transport_man_days)
   await c.env.DB.prepare(`
     UPDATE processing_records SET
       date=?, factory=?, staff_count=?, foundation_qty=?, base_qty=?, column_qty=?, beam_qty=?,
       fukashi_qty=?, slab_qty=?, doma_qty=?, civil_qty=?, wooden_qty=?, other_qty=?,
-      total_qty=?, qty_per_person=?, note=?, worker_names=?, workers_json=?, trailer_count=?, updated_at=CURRENT_TIMESTAMP
+      total_qty=?, qty_per_person=?, note=?, worker_names=?, workers_json=?, trailer_count=?,
+      process_transport_man_days=?, updated_at=CURRENT_TIMESTAMP
     WHERE id=?
   `).bind(
     body.date, body.factory, staffCount,
@@ -334,6 +371,7 @@ api.put('/records/:id', authMiddleware, async (c) => {
     workerNamesArr.length ? JSON.stringify(workerNamesArr) : null,
     workers.length ? JSON.stringify(workers) : null,
     trailerCount,
+    processTransportMd,
     id
   ).run()
 
@@ -391,6 +429,7 @@ api.get('/analytics/daily', authMiddleware, async (c) => {
              SUM(wooden_qty) as wooden_qty, SUM(other_qty) as other_qty,
              SUM(total_qty) as total_qty,
              SUM(COALESCE(trailer_count, 0)) as trailer_count,
+             SUM(COALESCE(process_transport_man_days, 0)) as process_transport_man_days,
              GROUP_CONCAT(worker_names, '|||') as worker_names_grouped
              FROM processing_records WHERE 1=1`
   const params: any[] = []
@@ -409,10 +448,13 @@ api.get('/analytics/daily', authMiddleware, async (c) => {
       // 重複排除（同日同工場の場合 1レコード/工場/日 なので通常重複無し）
       names = [...new Set(names)]
     }
+    const ptMd = Number(r.process_transport_man_days) || 0
     return {
       ...r,
       worker_names: names,
-      qty_per_person: r.staff_count > 0 ? r.total_qty / r.staff_count : 0
+      qty_per_person: r.staff_count > 0 ? r.total_qty / r.staff_count : 0,
+      // 集計方法: 期間内加工数量合計 / 期間内加工・運搬人工合計 (単純平均ではない)
+      qty_per_process_transport_manday: ptMd > 0 ? r.total_qty / ptMd : null
     }
   })
   return c.json({ data: enriched })
@@ -433,6 +475,7 @@ api.get('/analytics/monthly', authMiddleware, async (c) => {
              SUM(wooden_qty) as wooden_qty, SUM(other_qty) as other_qty,
              SUM(total_qty) as total_qty,
              SUM(COALESCE(trailer_count, 0)) as trailer_count,
+             SUM(COALESCE(process_transport_man_days, 0)) as process_transport_man_days,
              COUNT(DISTINCT date) as days
              FROM processing_records WHERE 1=1`
   const params: any[] = []
@@ -441,11 +484,15 @@ api.get('/analytics/monthly', authMiddleware, async (c) => {
   sql += ' GROUP BY ym, factory ORDER BY ym ASC'
 
   const { results } = await c.env.DB.prepare(sql).bind(...params).all()
-  const enriched = (results as any[]).map(r => ({
-    ...r,
-    qty_per_person: r.staff_count > 0 ? r.total_qty / r.staff_count : 0,
-    avg_daily_qty: r.days > 0 ? r.total_qty / r.days : 0
-  }))
+  const enriched = (results as any[]).map(r => {
+    const ptMd = Number(r.process_transport_man_days) || 0
+    return {
+      ...r,
+      qty_per_person: r.staff_count > 0 ? r.total_qty / r.staff_count : 0,
+      avg_daily_qty: r.days > 0 ? r.total_qty / r.days : 0,
+      qty_per_process_transport_manday: ptMd > 0 ? r.total_qty / ptMd : null
+    }
+  })
   return c.json({ data: enriched })
 })
 
@@ -463,6 +510,7 @@ api.get('/analytics/yearly', authMiddleware, async (c) => {
              SUM(wooden_qty) as wooden_qty, SUM(other_qty) as other_qty,
              SUM(total_qty) as total_qty,
              SUM(COALESCE(trailer_count, 0)) as trailer_count,
+             SUM(COALESCE(process_transport_man_days, 0)) as process_transport_man_days,
              COUNT(DISTINCT date) as days
              FROM processing_records WHERE 1=1`
   const params: any[] = []
@@ -470,10 +518,14 @@ api.get('/analytics/yearly', authMiddleware, async (c) => {
   sql += ' GROUP BY year, factory ORDER BY year ASC'
 
   const { results } = await c.env.DB.prepare(sql).bind(...params).all()
-  const enriched = (results as any[]).map(r => ({
-    ...r,
-    qty_per_person: r.staff_count > 0 ? r.total_qty / r.staff_count : 0
-  }))
+  const enriched = (results as any[]).map(r => {
+    const ptMd = Number(r.process_transport_man_days) || 0
+    return {
+      ...r,
+      qty_per_person: r.staff_count > 0 ? r.total_qty / r.staff_count : 0,
+      qty_per_process_transport_manday: ptMd > 0 ? r.total_qty / ptMd : null
+    }
+  })
   return c.json({ data: enriched })
 })
 

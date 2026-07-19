@@ -29,6 +29,9 @@ export interface ProcessingRecord {
   total_qty: number
   qty_per_person: number
   trailer_count: number
+  // 加工・運搬人工 (既存の staff_count = 直接加工人工とは独立した項目)
+  // NULL または 0 のときは "1人工あたりの加工・運搬数量" を "-" 表示とする
+  process_transport_man_days: number | null
   note: string | null
   created_by: number | null
   created_at: string
