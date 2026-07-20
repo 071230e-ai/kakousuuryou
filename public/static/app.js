@@ -1048,19 +1048,19 @@ function renderInput(record = null) {
 
         <div class="bg-teal-50 border border-teal-200 p-4 rounded-lg">
           <h3 class="font-semibold text-teal-900 mb-2">
-            <i class="fas fa-people-carry-box mr-1"></i>加工・運搬人工 <span class="text-xs font-normal text-gray-600 ml-1">（既存の「直接加工人工」とは別項目）</span>
+            <i class="fas fa-people-carry-box mr-1"></i>工場総人工 <span class="text-xs font-normal text-gray-600 ml-1">（既存の「直接加工人工」とは別項目）</span>
           </h3>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 items-end">
             <div>
-              <label class="block text-xs font-medium text-gray-700 mb-1">加工・運搬人工 (人工)</label>
-              <input id="process_transport_man_days" type="number" min="0" step="0.001" value="${fmtProcessTransportMd(r.process_transport_man_days)}" class="input-num" placeholder="例: 0.125, 1.000, 1.525" inputmode="decimal" title="加工・運搬人工 (0以上の数値、小数第3位まで入力可)" />
+              <label class="block text-xs font-medium text-gray-700 mb-1">工場総人工 (人工)</label>
+              <input id="process_transport_man_days" type="number" min="0" step="0.001" value="${fmtProcessTransportMd(r.process_transport_man_days)}" class="input-num" placeholder="例: 0.125, 1.000, 1.525" inputmode="decimal" title="工場総人工 (0以上の数値、小数第3位まで入力可)" />
             </div>
             <div>
               <p class="text-xs text-gray-600 mb-1">1人工あたりの加工・運搬数量</p>
               <p id="perPtMdDisplay" class="text-lg font-bold text-teal-700">－</p>
             </div>
           </div>
-          <p class="text-xs text-gray-600 mt-2">未入力または0の場合は「1人工あたりの加工・運搬数量」は「－」で表示されます。</p>
+          <p class="text-xs text-gray-600 mt-2">工場総人工が未入力または0の場合は、「1人工あたりの加工・運搬数量」は「－」で表示されます。</p>
         </div>
 
         <div>
@@ -1397,7 +1397,7 @@ function renderListTable() {
           <th>日付</th><th>工場</th><th>人工合計</th><th>人員名（人工）</th>
           ${PART_KEYS.map(k=>`<th class="part-${k.replace('_qty','')}">${PART_LABELS[k]}</th>`).join('')}
           <th>総加工量</th><th>1人工あたり</th><th class="part-trailer">トレーラー台数</th>
-          <th style="background:#ccfbf1;color:#134e4a">加工・運搬人工</th>
+          <th style="background:#ccfbf1;color:#134e4a">工場総人工</th>
           <th style="background:#ccfbf1;color:#134e4a">1人工あたりの<br>加工・運搬数量</th>
           <th>備考</th>
         </tr>
@@ -1562,7 +1562,7 @@ async function renderDaily() {
               <div class="value text-amber-900">${totalTrailer.toLocaleString('ja-JP')}<span class="text-base font-normal text-gray-600 ml-1">台</span></div>
             </div>
             <div class="stat-card" style="border-left:4px solid #0d9488;background:#f0fdfa">
-              <div class="label text-teal-800"><i class="fas fa-people-carry-box mr-1"></i>加工・運搬人工</div>
+              <div class="label text-teal-800"><i class="fas fa-people-carry-box mr-1"></i>工場総人工</div>
               <div class="value text-teal-900">${totalPtMd > 0 ? fmtTotalMd(totalPtMd) + '<span class="text-base font-normal text-gray-600 ml-1">人工</span>' : '<span class="text-gray-400">－</span>'}</div>
             </div>
             <div class="stat-card" style="border-left:4px solid #0d9488;background:#f0fdfa">
@@ -1606,7 +1606,7 @@ async function renderDaily() {
           <th>日付</th><th>工場</th><th>人工合計</th>
           ${PART_KEYS.map(k=>`<th>${PART_LABELS[k]}</th>`).join('')}
           <th>合計</th><th>1人工あたり</th><th class="part-trailer">トレーラー台数</th>
-          <th style="background:#ccfbf1;color:#134e4a">加工・運搬人工</th>
+          <th style="background:#ccfbf1;color:#134e4a">工場総人工</th>
           <th style="background:#ccfbf1;color:#134e4a">1人工あたりの<br>加工・運搬数量</th>
         </tr></thead>
         <tbody>
@@ -1763,7 +1763,7 @@ async function renderMonthly() {
           </div>
           <div class="bg-teal-50 border border-teal-200 p-4 rounded-xl shadow-sm">
             <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
-              <h3 class="font-semibold text-teal-900"><i class="fas fa-people-carry-box mr-1"></i>${year}年 加工・運搬人工(合計)</h3>
+              <h3 class="font-semibold text-teal-900"><i class="fas fa-people-carry-box mr-1"></i>${year}年 工場総人工(合計)</h3>
               <p class="text-xs text-gray-600">工場: ${escapeHtml(factoryLabelM)}</p>
             </div>
             <div class="flex flex-wrap gap-4 items-end">
@@ -1831,14 +1831,14 @@ async function renderMonthly() {
     tableEl.innerHTML = `
       <div class="p-3 bg-gray-50 border-b border-gray-200">
         <h3 class="font-semibold text-gray-800"><i class="fas fa-table mr-1"></i>月別 詳細データ</h3>
-        <p class="text-xs text-gray-600 mt-1">部位別の月間合計 + トレーラー台数 + 加工・運搬人工</p>
+        <p class="text-xs text-gray-600 mt-1">部位別の月間合計 + トレーラー台数 + 工場総人工</p>
       </div>
       <table class="data-table">
         <thead><tr>
           <th>月</th><th>工場</th><th>稼働日</th><th>延べ人工</th><th style="background:#fef3c7;color:#78350f;min-width:110px">トレーラー台数</th>
           ${PART_KEYS.map(k=>`<th>${PART_LABELS[k]}</th>`).join('')}
           <th>月間合計</th><th>1日平均</th><th>1人平均</th>
-          <th style="background:#ccfbf1;color:#134e4a">加工・運搬人工</th>
+          <th style="background:#ccfbf1;color:#134e4a">工場総人工</th>
           <th style="background:#ccfbf1;color:#134e4a">1人工あたりの<br>加工・運搬数量</th>
         </tr></thead>
         <tbody>
@@ -2069,7 +2069,7 @@ async function renderYearly() {
         </div>
         <div class="bg-teal-50 border border-teal-200 p-4 rounded-xl shadow-sm">
           <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
-            <h3 class="font-semibold text-teal-900"><i class="fas fa-people-carry-box mr-1"></i>加工・運搬人工(合計)</h3>
+            <h3 class="font-semibold text-teal-900"><i class="fas fa-people-carry-box mr-1"></i>工場総人工(合計)</h3>
             <p class="text-xs text-gray-600">工場: ${escapeHtml(factoryLabelY)}</p>
           </div>
           <div class="flex flex-wrap gap-4 items-end">
@@ -2089,7 +2089,7 @@ async function renderYearly() {
           <th>年</th><th>工場</th><th>稼働日</th><th>延べ人工</th>
           ${PART_KEYS.map(k=>`<th>${PART_LABELS[k]}</th>`).join('')}
           <th>年間合計</th><th>1人工あたり</th><th class="part-trailer">トレーラー台数</th>
-          <th style="background:#ccfbf1;color:#134e4a">加工・運搬人工</th>
+          <th style="background:#ccfbf1;color:#134e4a">工場総人工</th>
           <th style="background:#ccfbf1;color:#134e4a">1人工あたりの<br>加工・運搬数量</th>
         </tr></thead>
         <tbody>
@@ -3572,7 +3572,7 @@ function exportListCsvUnified() {
     { key: 'total_qty', label: '総加工数量（kg）', type: 'number' },
     { key: 'qty_per_person', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 },
     { key: 'trailer_count', label: 'トレーラー台数（台）', type: 'number' },
-    { key: 'process_transport_man_days', label: '加工・運搬人工（人工）', type: 'number', digits: 3 },
+    { key: 'process_transport_man_days', label: '工場総人工（人工）', type: 'number', digits: 3 },
     { key: 'qty_per_process_transport_manday', label: '1人工あたりの加工・運搬数量（kg/人工）', type: 'number', digits: 1 },
     { key: 'note', label: '備考' }
   ];
@@ -3632,7 +3632,7 @@ async function exportListPdfUnified() {
     { key: 'total_qty', label: '総加工量(kg)', type: 'number', width: 28 },
     { key: 'qty_per_person', label: '1人工あたり', type: 'number', digits: 1, width: 28 },
     { key: 'trailer_count', label: 'ﾄﾚｰﾗｰ(台)', type: 'number', width: 22 },
-    { key: 'process_transport_man_days', label: '加工・運搬人工', type: 'number', digits: 3, width: 30,
+    { key: 'process_transport_man_days', label: '工場総人工', type: 'number', digits: 3, width: 30,
       pdfRender: (v) => (v == null || v === '' || !isFinite(Number(v))) ? '－' : _pdfNum(v, { digits: 3, unit: '人工' }) },
     { key: 'qty_per_process_transport_manday', label: '1人工あたりの加工・運搬', type: 'number', digits: 1, width: 34,
       pdfRender: (v) => (v == null || v === '' || !isFinite(Number(v))) ? '－' : _pdfNum(v, { digits: 1, unit: 'kg' }) },
@@ -3707,7 +3707,7 @@ function exportDailyCsvUnified() {
     { key: 'total_qty', label: '総加工数量（kg）', type: 'number' },
     { key: 'qty_per_person', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 },
     { key: 'trailer_count', label: 'トレーラー台数（台）', type: 'number' },
-    { key: 'process_transport_man_days', label: '加工・運搬人工（人工）', type: 'number', digits: 3 },
+    { key: 'process_transport_man_days', label: '工場総人工（人工）', type: 'number', digits: 3 },
     { key: 'qty_per_process_transport_manday', label: '1人工あたりの加工・運搬数量（kg/人工）', type: 'number', digits: 1 }
   ];
   const rows = data.map(r => {
@@ -3745,8 +3745,8 @@ function exportDailyCsvUnified() {
   // シンプルにするためメイン一覧のみ / 部位別を別ファイルで
   const fname = `日別分析_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}`;
   const ptMdSummary = totalPtMd > 0
-    ? ` / 加工・運搬人工=${_csvNum(totalPtMd, {digits:3})}人工 / 1人工あたりの加工・運搬数量=${_csvNum(perPtMd, {digits:1})}kg/人工`
-    : ' / 加工・運搬人工=－ / 1人工あたりの加工・運搬数量=－';
+    ? ` / 工場総人工=${_csvNum(totalPtMd, {digits:3})}人工 / 1人工あたりの加工・運搬数量=${_csvNum(perPtMd, {digits:1})}kg/人工`
+    : ' / 工場総人工=－ / 1人工あたりの加工・運搬数量=－';
   exportCsvUnified({
     filename: fname + '_日別一覧',
     title: `日別分析 - 日別一覧 (集計: 総加工量=${_csvNum(totalQty)}kg / 総人工=${_csvNum(totalMd, {digits:3})} / トレーラー合計=${_csvNum(totalTrailer)}台${ptMdSummary})`,
@@ -3800,7 +3800,7 @@ async function exportDailyPdfUnified() {
     { key: 'total_qty', label: '総加工数量(kg)', type: 'number', width: 32 },
     { key: 'qty_per_person', label: '1人工あたり', type: 'number', digits: 1, width: 30 },
     { key: 'trailer_count', label: 'ﾄﾚｰﾗｰ台数', type: 'number', width: 24 },
-    { key: 'process_transport_man_days', label: '加工・運搬人工', type: 'number', digits: 3, width: 32,
+    { key: 'process_transport_man_days', label: '工場総人工', type: 'number', digits: 3, width: 32,
       pdfRender: (v) => (v == null || v === '' || !isFinite(Number(v))) ? '－' : _pdfNum(v, { digits: 3, unit: '人工' }) },
     { key: 'qty_per_process_transport_manday', label: '1人工あたりの加工・運搬', type: 'number', digits: 1, width: 36,
       pdfRender: (v) => (v == null || v === '' || !isFinite(Number(v))) ? '－' : _pdfNum(v, { digits: 1, unit: 'kg' }) }
@@ -3857,7 +3857,7 @@ async function exportDailyPdfUnified() {
       { label: '総人工', value: _pdfNum(totalMd, { digits: 3, unit: '人工' }) },
       { label: '1人工あたり', value: totalMd > 0 ? _pdfNum(perMd, { digits: 1, unit: 'kg/人工' }) : '-' },
       { label: 'トレーラー合計', value: _pdfNum(totalTrailer, { unit: '台' }) },
-      { label: '加工・運搬人工合計', value: totalPtMd > 0 ? _pdfNum(totalPtMd, { digits: 3, unit: '人工' }) : '－' },
+      { label: '工場総人工合計', value: totalPtMd > 0 ? _pdfNum(totalPtMd, { digits: 3, unit: '人工' }) : '－' },
       { label: '1人工あたりの加工・運搬数量', value: perPtMd != null ? _pdfNum(perPtMd, { digits: 1, unit: 'kg/人工' }) : '－' }
     ],
     sections
@@ -3897,7 +3897,7 @@ function exportMonthlyCsvUnified() {
     { key: 'avg_daily_qty', label: '1日平均（kg）', type: 'number', digits: 1 },
     { key: 'qty_per_person', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 },
     { key: 'trailer_count', label: 'トレーラー台数（台）', type: 'number' },
-    { key: 'process_transport_man_days', label: '加工・運搬人工（人工）', type: 'number', digits: 3 },
+    { key: 'process_transport_man_days', label: '工場総人工（人工）', type: 'number', digits: 3 },
     { key: 'qty_per_process_transport_manday', label: '1人工あたりの加工・運搬数量（kg/人工）', type: 'number', digits: 1 }
   ];
   const rows = data.map(r => {
@@ -4006,7 +4006,7 @@ async function exportMonthlyPdfUnified() {
     { key: 'total_qty', label: '月間合計(kg)', type: 'number', width: 32 },
     { key: 'avg_daily_qty', label: '1日平均', type: 'number', digits: 1, width: 28 },
     { key: 'qty_per_person', label: '1人工あたり', type: 'number', digits: 1, width: 30 },
-    { key: 'process_transport_man_days', label: '加工・運搬人工', type: 'number', digits: 3, width: 32,
+    { key: 'process_transport_man_days', label: '工場総人工', type: 'number', digits: 3, width: 32,
       pdfRender: (v) => (v == null || v === '' || !isFinite(Number(v))) ? '－' : _pdfNum(v, { digits: 3, unit: '人工' }) },
     { key: 'qty_per_process_transport_manday', label: '1人工あたりの加工・運搬', type: 'number', digits: 1, width: 36,
       pdfRender: (v) => (v == null || v === '' || !isFinite(Number(v))) ? '－' : _pdfNum(v, { digits: 1, unit: 'kg' }) }
@@ -4128,7 +4128,7 @@ async function exportMonthlyPdfUnified() {
       { label: '総人工', value: _pdfNum(totalMd, { digits: 3, unit: '人工' }) },
       { label: 'トレーラー合計', value: _pdfNum(totalTrailer, { unit: '台' }) },
       { label: '対象月数', value: `${data.length} 行` },
-      { label: '加工・運搬人工合計', value: totalPtMd > 0 ? _pdfNum(totalPtMd, { digits: 3, unit: '人工' }) : '－' },
+      { label: '工場総人工合計', value: totalPtMd > 0 ? _pdfNum(totalPtMd, { digits: 3, unit: '人工' }) : '－' },
       { label: '1人工あたりの加工・運搬数量', value: perPtMd != null ? _pdfNum(perPtMd, { digits: 1, unit: 'kg/人工' }) : '－' }
     ],
     sections
@@ -4169,7 +4169,7 @@ function exportYearlyCsvUnified() {
     { key: 'total_qty', label: '年間総加工数量（kg）', type: 'number' },
     { key: 'qty_per_person', label: '1人工あたり加工数量（kg/人工）', type: 'number', digits: 1 },
     { key: 'trailer_count', label: '年間トレーラー台数（台）', type: 'number' },
-    { key: 'process_transport_man_days', label: '加工・運搬人工（人工）', type: 'number', digits: 3 },
+    { key: 'process_transport_man_days', label: '工場総人工（人工）', type: 'number', digits: 3 },
     { key: 'qty_per_process_transport_manday', label: '1人工あたりの加工・運搬数量（kg/人工）', type: 'number', digits: 1 }
   ];
   const yearlyRows = data.map(r => {
@@ -4304,7 +4304,7 @@ async function exportYearlyPdfUnified() {
     { key: 'total_qty', label: '年間合計(kg)', type: 'number', width: 34 },
     { key: 'qty_per_person', label: '1人工あたり', type: 'number', digits: 1, width: 30 },
     { key: 'trailer_count', label: '年間ﾄﾚｰﾗｰ台数', type: 'number', width: 30, style: { fillColor: [255, 251, 235] } },
-    { key: 'process_transport_man_days', label: '加工・運搬人工', type: 'number', digits: 3, width: 32,
+    { key: 'process_transport_man_days', label: '工場総人工', type: 'number', digits: 3, width: 32,
       pdfRender: (v) => (v == null || v === '' || !isFinite(Number(v))) ? '－' : _pdfNum(v, { digits: 3, unit: '人工' }) },
     { key: 'qty_per_process_transport_manday', label: '1人工あたりの加工・運搬', type: 'number', digits: 1, width: 36,
       pdfRender: (v) => (v == null || v === '' || !isFinite(Number(v))) ? '－' : _pdfNum(v, { digits: 1, unit: 'kg' }) }
@@ -4398,7 +4398,7 @@ async function exportYearlyPdfUnified() {
       { label: '総人工', value: _pdfNum(totalMd, { digits: 3, unit: '人工' }) },
       { label: '年間トレーラー台数', value: _pdfNum(totalTrailer, { unit: '台' }) },
       { label: '月別推移対象年', value: trendYear ? `${trendYear}年` : '-' },
-      { label: '加工・運搬人工合計', value: totalPtMd > 0 ? _pdfNum(totalPtMd, { digits: 3, unit: '人工' }) : '－' },
+      { label: '工場総人工合計', value: totalPtMd > 0 ? _pdfNum(totalPtMd, { digits: 3, unit: '人工' }) : '－' },
       { label: '1人工あたりの加工・運搬数量', value: perPtMd != null ? _pdfNum(perPtMd, { digits: 1, unit: 'kg/人工' }) : '－' }
     ],
     sections
