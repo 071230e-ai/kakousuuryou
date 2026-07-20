@@ -1393,12 +1393,13 @@ function renderListTable() {
     <table class="data-table">
       <thead>
         <tr>
+          <th class="no-print">操作</th>
           <th>日付</th><th>工場</th><th>人工合計</th><th>人員名（人工）</th>
           ${PART_KEYS.map(k=>`<th class="part-${k.replace('_qty','')}">${PART_LABELS[k]}</th>`).join('')}
           <th>総加工量</th><th>1人工あたり</th><th class="part-trailer">トレーラー台数</th>
           <th style="background:#ccfbf1;color:#134e4a">加工・運搬人工</th>
           <th style="background:#ccfbf1;color:#134e4a">1人工あたりの<br>加工・運搬数量</th>
-          <th>備考</th><th class="no-print">操作</th>
+          <th>備考</th>
         </tr>
       </thead>
       <tbody>
@@ -1416,6 +1417,12 @@ function renderListTable() {
           const ptMdDisplay = (ptMd == null) ? '<span class="text-gray-400">－</span>' : fmtProcessTransportMd(ptMd) + ' 人工';
           const perPtMdDisplay = fmtQtyPerPtMd(total, ptMd);
           return `<tr class="${lowQty?'low-qty':''} ${highPer?'high-perperson':''}">
+            <td class="no-print">
+              <div class="flex gap-1 justify-center">
+                <button data-edit="${r.id}" class="text-blue-600 hover:underline text-xs" ${state.useSampleData?'disabled':''}><i class="fas fa-edit"></i> 編集</button>
+                ${isAdmin && !state.useSampleData?`<button data-del="${r.id}" class="text-red-600 hover:underline text-xs"><i class="fas fa-trash"></i> 削除</button>`:''}
+              </div>
+            </td>
             <td class="text">${fmt.date(r.date)}</td>
             <td class="text"><span class="px-2 py-1 rounded text-xs ${r.factory==='本社工場'?'badge-honsha':'badge-dai2'}">${escapeHtml(r.factory||'')}</span></td>
             <td>${fmtManDays(safeNum(r.staff_count))}</td>
@@ -1427,12 +1434,6 @@ function renderListTable() {
             <td class="text-teal-800 font-semibold" style="background:#f0fdfa">${ptMdDisplay}</td>
             <td class="text-teal-800" style="background:#f0fdfa">${perPtMdDisplay}</td>
             <td class="text text-xs">${escapeHtml(r.note||'')}</td>
-            <td class="no-print">
-              <div class="flex gap-1 justify-center">
-                <button data-edit="${r.id}" class="text-blue-600 hover:underline text-xs" ${state.useSampleData?'disabled':''}><i class="fas fa-edit"></i> 編集</button>
-                ${isAdmin && !state.useSampleData?`<button data-del="${r.id}" class="text-red-600 hover:underline text-xs"><i class="fas fa-trash"></i> 削除</button>`:''}
-              </div>
-            </td>
           </tr>`;
         }).join('')}
       </tbody>
