@@ -77,10 +77,21 @@ export interface TransportWorkerEntry {
   man_days: number
 }
 
+// 車両明細 (親: transport_records / 子テーブル: transport_vehicle_items)
+// 1件の積込・運搬実績に対して複数の車両×数量を紐付ける。
+export interface TransportVehicleItem {
+  id?: number
+  vehicle_name: string
+  quantity: number      // kg (小数第3位まで)
+  sort_order?: number   // 入力順 (0起点)
+}
+
 export interface TransportRecord {
   id: number
   transport_date: string
   factory: Factory
+  // 旧: 単一車両モデル。後方互換のため列は残っている。
+  // マイグレーション後は vehicles (子明細) を正とし、UI では vehicles を優先表示する。
   vehicle: string
   transport_quantity_kg: number
   created_by: number | null
@@ -88,6 +99,9 @@ export interface TransportRecord {
   updated_at: string
   // 中間テーブルから join した派生情報
   workers?: TransportWorkerEntry[]
+  vehicles?: TransportVehicleItem[]        // 車両明細 (sort_order 昇順)
   total_man_days?: number
+  // vehicles の合計 (存在すれば sum(vehicles.quantity)、無ければ transport_quantity_kg)
+  total_quantity_kg?: number
   qty_per_man_day?: number
 }

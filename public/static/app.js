@@ -4702,7 +4702,8 @@ function renderTransportInput(record = null) {
     factory: '本社工場',
     vehicle: '',
     transport_quantity_kg: '',
-    workers: []
+    workers: [],
+    vehicles: []
   };
   // ローカル workers: [{worker_name, man_days}]
   let workers = Array.isArray(r.workers) ? r.workers.map(w => ({
@@ -4710,6 +4711,27 @@ function renderTransportInput(record = null) {
     man_days: (w.man_days === '' || w.man_days == null) ? '' : Number(w.man_days)
   })) : [];
   if (workers.length === 0 && !isEdit) workers = [{ worker_name: '', man_days: '' }];
+
+  // ローカル vehicles: [{vehicle_name, quantity}] (sort_order は表示順=配列順に依存)
+  // 編集時: サーバから受け取った vehicles があればそれを使い、無ければ旧単一 vehicle/quantity を1件として復元。
+  // 新規時: 空1行を表示。
+  let vehicles = [];
+  if (Array.isArray(r.vehicles) && r.vehicles.length > 0) {
+    vehicles = r.vehicles.map(v => ({
+      vehicle_name: String(v.vehicle_name || '').trim(),
+      quantity: (v.quantity === '' || v.quantity == null) ? '' : Number(v.quantity)
+    }));
+  } else if (isEdit && (r.vehicle || r.transport_quantity_kg)) {
+    // 旧レコードとの後方互換 (0007 マイグレーション対象外の想定外レコードのみ発生)
+    vehicles = [{
+      vehicle_name: String(r.vehicle || '').trim(),
+      quantity: (r.transport_quantity_kg === 0 || r.transport_quantity_kg) ? Number(r.transport_quantity_kg) : ''
+    }];
+  } else {
+    vehicles = [{ vehicle_name: '', quantity: '' }];
+  }
+  // 編集時に vehicles が空 (稀ケース) の場合は空1行を保証
+  if (vehicles.length === 0) vehicles = [{ vehicle_name: '', quantity: '' }];
 
   const main = document.getElementById('main');
   main.innerHTML = `
@@ -4749,20 +4771,22 @@ function renderTransportInput(record = null) {
           </div>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">積込・運搬車両 <span class="text-red-500">*</span></label>
-            <input id="tr_vehicle" type="text" required maxlength="100" value="${escapeHtml(r.vehicle || '')}" placeholder="例: 10t車、8tユニック、京都100あ12-34" class="input-base" list="tr_vehicleList" />
-            <datalist id="tr_vehicleList"></datalist>
-            <p class="text-xs text-gray-500 mt-1">車両区分は自由入力です（100文字以内）</p>
+        <div class="bg-emerald-50 border border-emerald-200 p-4 rounded-lg">
+          <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+            <h3 class="font-semibold text-emerald-900">
+              <i class="fas fa-truck-moving mr-1"></i>積込・運搬車両・数量 <span id="tr_vehicleCount" class="text-xs font-normal text-gray-600 ml-1"></span>
+            </h3>
+            <button type="button" id="tr_addVehicleBtn" class="btn-secondary text-sm">
+              <i class="fas fa-plus mr-1"></i>車両を追加
+            </button>
           </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">積込・運搬数量 <span class="text-red-500">*</span></label>
-            <div class="flex items-center gap-2">
-              <input id="tr_qty" type="number" required min="0.001" step="0.001" value="${(r.transport_quantity_kg === 0 || r.transport_quantity_kg) ? r.transport_quantity_kg : ''}" placeholder="例: 12500" class="input-num flex-1" inputmode="decimal" />
-              <span class="text-gray-700 font-medium">kg</span>
-            </div>
-            <p class="text-xs text-gray-500 mt-1">0より大きい数値・小数入力可</p>
+          <p class="text-xs text-gray-600 mb-2">1日の実績に対して複数の車両×数量を入力できます。車両名は100文字以内、数量は0より大きい数値・小数第3位までです。</p>
+          <div id="tr_vehicleList" class="space-y-2"></div>
+          <datalist id="tr_vehicleMasterList"></datalist>
+          <div class="mt-3 text-right">
+            <span class="text-sm text-gray-600 mr-2">合計積込・運搬数量</span>
+            <span id="tr_totalQty" class="text-lg font-bold text-emerald-700">0</span>
+            <span class="text-sm text-gray-600 ml-1">kg</span>
           </div>
         </div>
 
@@ -4781,9 +4805,9 @@ function renderTransportInput(record = null) {
     </div>
   `;
 
-  // 車両サジェスト取得
+  // 車両サジェスト取得 (旧列 + 新明細から UNION)
   api.transportVehicles().then(list => {
-    const dl = document.getElementById('tr_vehicleList');
+    const dl = document.getElementById('tr_vehicleMasterList');
     if (dl && Array.isArray(list)) {
       dl.innerHTML = list.map(v => `<option value="${escapeHtml(v)}"></option>`).join('');
     }
@@ -4852,23 +4876,101 @@ function renderTransportInput(record = null) {
     if (wc) wc.textContent = validNames > 0 ? `（${validNames}人 / ${trFmtMd(total)}人工）` : '';
   };
 
+  // ---- 車両明細 行レンダリングと合計計算 ----
+  // 合計は Math.round(v * 1000) を整数で足し合わせてから /1000 に戻すことで、
+  // 0.1 + 0.2 = 0.30000000000000004 のような浮動小数点誤差を回避する。
+  const recalcTotalQty = () => {
+    let microTotal = 0; // マイクロkg (×1000 スケール整数)
+    for (const v of vehicles) {
+      const n = Number(v.quantity);
+      if (isFinite(n) && n > 0) microTotal += Math.round(n * 1000);
+    }
+    const total = microTotal / 1000;
+    const el = document.getElementById('tr_totalQty');
+    if (el) el.textContent = trFmtQty(total);
+    const vc = document.getElementById('tr_vehicleCount');
+    const validCount = vehicles.filter(v => String(v.vehicle_name || '').trim() && v.quantity !== '' && v.quantity != null && Number(v.quantity) > 0).length;
+    if (vc) vc.textContent = validCount > 0 ? `（${validCount}台 / 合計 ${trFmtQty(total)} kg）` : '';
+  };
+
+  const renderTrVehicleList = () => {
+    const list = document.getElementById('tr_vehicleList');
+    if (!list) return;
+    if (vehicles.length === 0) {
+      // 保険: 空にならないよう空1行を保証
+      vehicles = [{ vehicle_name: '', quantity: '' }];
+    }
+    list.innerHTML = vehicles.map((v, i) => `
+      <div class="flex flex-col sm:flex-row gap-2 sm:items-center bg-white p-2 rounded border border-emerald-100" data-tr-vehicle-row="${i}">
+        <div class="flex-1">
+          <label class="text-xs text-gray-500 sm:hidden">積込・運搬車両</label>
+          <input type="text" data-tr-vehicle-name="${i}" value="${escapeHtml(v.vehicle_name || '')}" maxlength="100" placeholder="例: 10t車、8tユニック" class="input-base w-full" list="tr_vehicleMasterList" />
+        </div>
+        <div class="w-full sm:w-40">
+          <label class="text-xs text-gray-500 sm:hidden">積込・運搬数量</label>
+          <div class="flex items-center gap-1">
+            <input type="number" data-tr-vehicle-qty="${i}" value="${v.quantity === '' ? '' : v.quantity}" min="0.001" step="0.001" placeholder="例: 8000" class="input-num w-full" inputmode="decimal" />
+            <span class="text-gray-700 text-sm">kg</span>
+          </div>
+        </div>
+        <button type="button" data-tr-vehicle-del="${i}" class="btn-danger text-sm whitespace-nowrap" title="削除">
+          <i class="fas fa-trash"></i><span class="hidden sm:inline ml-1">削除</span>
+        </button>
+      </div>
+      <div data-tr-vehicle-err="${i}" class="text-red-600 text-xs mt-1 hidden pl-1"></div>
+    `).join('');
+    list.querySelectorAll('[data-tr-vehicle-name]').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const idx = Number(e.target.dataset.trVehicleName);
+        if (vehicles[idx]) vehicles[idx].vehicle_name = e.target.value;
+        recalcTotalQty();
+      });
+    });
+    list.querySelectorAll('[data-tr-vehicle-qty]').forEach(inp => {
+      inp.addEventListener('input', (e) => {
+        const idx = Number(e.target.dataset.trVehicleQty);
+        if (vehicles[idx]) vehicles[idx].quantity = e.target.value === '' ? '' : Number(e.target.value);
+        recalcTotalQty();
+      });
+    });
+    list.querySelectorAll('[data-tr-vehicle-del]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const idx = Number(e.currentTarget.dataset.trVehicleDel);
+        vehicles.splice(idx, 1);
+        if (vehicles.length === 0) vehicles = [{ vehicle_name: '', quantity: '' }];
+        renderTrVehicleList();
+        recalcTotalQty();
+      });
+    });
+    recalcTotalQty();
+  };
+
   renderTrWorkerList();
+  renderTrVehicleList();
 
   document.getElementById('tr_addWorkerBtn').addEventListener('click', () => {
     workers.push({ worker_name: '', man_days: '' });
     renderTrWorkerList();
   });
 
+  document.getElementById('tr_addVehicleBtn').addEventListener('click', () => {
+    vehicles.push({ vehicle_name: '', quantity: '' });
+    renderTrVehicleList();
+  });
+
   document.getElementById('tr_clearBtn').addEventListener('click', () => {
     if (!confirm('入力内容をクリアしますか？')) return;
     workers = [{ worker_name: '', man_days: '' }];
+    vehicles = [{ vehicle_name: '', quantity: '' }];
+    // 編集中の内部状態も含めて完全リセット (別実績の明細が残らないようにする)
+    transportState.editingId = null;
+    transportState.editingUpdatedAt = null;
     document.getElementById('tr_date').value = dayjs().format('YYYY-MM-DD');
     document.getElementById('tr_factory').value = '本社工場';
-    document.getElementById('tr_vehicle').value = '';
-    document.getElementById('tr_qty').value = '';
     document.getElementById('tr_formError').classList.add('hidden');
     document.getElementById('tr_formSuccess').classList.add('hidden');
     renderTrWorkerList();
+    renderTrVehicleList();
   });
 
   if (isEdit) {
@@ -4878,28 +4980,89 @@ function renderTransportInput(record = null) {
     });
   }
 
+  // 車両行のエラーを行毎に表示するヘルパー
+  const clearVehicleErrors = () => {
+    document.querySelectorAll('[data-tr-vehicle-err]').forEach(el => {
+      el.classList.add('hidden');
+      el.textContent = '';
+    });
+  };
+  const showVehicleRowErr = (idx, msg) => {
+    const el = document.querySelector(`[data-tr-vehicle-err="${idx}"]`);
+    if (el) {
+      el.textContent = msg;
+      el.classList.remove('hidden');
+    }
+  };
+
   document.getElementById('transportForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const errEl = document.getElementById('tr_formError');
     const okEl = document.getElementById('tr_formSuccess');
     errEl.classList.add('hidden'); okEl.classList.add('hidden');
+    clearVehicleErrors();
 
     const date = document.getElementById('tr_date').value;
     const factory = document.getElementById('tr_factory').value;
-    const vehicle = document.getElementById('tr_vehicle').value.trim();
-    const qtyRaw = document.getElementById('tr_qty').value;
 
     // クライアント側バリデーション (サーバ側でも同様に検証)
     if (!date) return showTrErr(errEl, '日付を入力してください');
     if (!factory) return showTrErr(errEl, '工場の別を選択してください');
-    if (!vehicle) return showTrErr(errEl, '積込・運搬車両を入力してください');
-    if (vehicle.length > 100) return showTrErr(errEl, '積込・運搬車両は100文字以内で入力してください');
-    if (qtyRaw === '' || qtyRaw == null) return showTrErr(errEl, '積込・運搬数量を入力してください');
-    const qtyNum = Number(qtyRaw);
-    if (!isFinite(qtyNum) || qtyNum <= 0) return showTrErr(errEl, '積込・運搬数量は0より大きい数値を指定してください');
-    // 運搬数量は小数第3位まで保持 (DB REAL)。第4位以降は四捨五入する。
-    const qty = Math.round(qtyNum * 1000) / 1000;
 
+    // ---- 車両明細バリデーション ----
+    // 完全空行はスキップ、片欠けはエラー、少なくとも1行有効を必須。
+    const validVehicles = [];
+    let hasVehicleRowError = false;
+    for (let i = 0; i < vehicles.length; i++) {
+      const v = vehicles[i];
+      const name = String(v.vehicle_name || '').trim();
+      const hasName = !!name;
+      const rawQty = v.quantity;
+      const hasQty = !(rawQty === '' || rawQty == null);
+      // 完全空行はスキップ
+      if (!hasName && !hasQty) continue;
+      // 片欠け: エラー行表示
+      if (!hasName) {
+        showVehicleRowErr(i, '積込・運搬車両を入力してください');
+        hasVehicleRowError = true;
+        continue;
+      }
+      if (name.length > 100) {
+        showVehicleRowErr(i, '積込・運搬車両は100文字以内で入力してください');
+        hasVehicleRowError = true;
+        continue;
+      }
+      if (!hasQty) {
+        showVehicleRowErr(i, '積込・運搬数量を入力してください');
+        hasVehicleRowError = true;
+        continue;
+      }
+      const qtyNum = Number(rawQty);
+      if (!isFinite(qtyNum)) {
+        showVehicleRowErr(i, '積込・運搬数量は数値で入力してください');
+        hasVehicleRowError = true;
+        continue;
+      }
+      if (qtyNum <= 0) {
+        showVehicleRowErr(i, '積込・運搬数量は0より大きい数値を入力してください');
+        hasVehicleRowError = true;
+        continue;
+      }
+      // 小数第4位以降が指定されていないかチェック (0.0001 のような入力を拒否)
+      // Math.round(v * 1000) と v * 1000 の差が非ゼロならOKとする閾値
+      const scaled = qtyNum * 1000;
+      if (Math.abs(scaled - Math.round(scaled)) > 1e-6) {
+        showVehicleRowErr(i, '積込・運搬数量は小数第3位まで入力してください');
+        hasVehicleRowError = true;
+        continue;
+      }
+      const q = Math.round(qtyNum * 1000) / 1000;
+      validVehicles.push({ vehicle_name: name, quantity: q });
+    }
+    if (hasVehicleRowError) return showTrErr(errEl, '車両明細に入力エラーがあります。エラー行の内容を修正してください。');
+    if (validVehicles.length === 0) return showTrErr(errEl, '積込・運搬車両を1件以上入力してください');
+
+    // ---- 人員バリデーション ----
     const validWorkers = workers
       .map(w => ({ worker_name: String(w.worker_name || '').trim(), man_days: w.man_days === '' ? null : Number(w.man_days) }))
       .filter(w => w.worker_name);
@@ -4917,15 +5080,21 @@ function renderTransportInput(record = null) {
     const orig = submitBtn.innerHTML;
     submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>処理中...';
 
+    // 合計数量 (後方互換の派生値。サーバ側でも再計算されるが、ペイロードにも含めておく)
+    const microTotal = validVehicles.reduce((s, v) => s + Math.round(v.quantity * 1000), 0);
+    const totalQty = microTotal / 1000;
+
     const payload = {
       transport_date: date,
       factory,
-      vehicle,
-      transport_quantity_kg: qty,
+      // 後方互換: 旧単一フィールドも派生値として送る (代表車両 + 合計数量)。
+      // サーバ側では vehicles 配列を正とし、旧列は親レコードの参考値として更新する。
+      vehicle: validVehicles[0].vehicle_name,
+      transport_quantity_kg: totalQty,
+      vehicles: validVehicles.map(v => ({ vehicle_name: v.vehicle_name, quantity: v.quantity })),
       workers: validWorkers.map(w => ({ worker_name: w.worker_name, man_days: w.man_days }))
     };
-    // 楽観ロック: 編集時のみ、開始時点の updated_at を送る。サーバ側で現在値と比較し
-    // 不一致なら 409 (conflict) を返す。他タブ・他ユーザーの並行編集を検出する。
+    // 楽観ロック: 編集時のみ、開始時点の updated_at を送る。
     if (isEdit && transportState.editingUpdatedAt) {
       payload.expected_updated_at = transportState.editingUpdatedAt;
     }
@@ -4937,7 +5106,6 @@ function renderTransportInput(record = null) {
       } else {
         saved = await api.createTransport(payload);
       }
-      // 成功時: サーバから返る最新 updated_at を保持しておく (連続編集対応)
       transportState.editingUpdatedAt = saved.updated_at || null;
       okEl.innerHTML = `<i class="fas fa-check-circle mr-1"></i>${isEdit ? '更新しました' : '登録しました'} (ID: ${saved.id})　<a class="underline text-blue-600" href="#" id="tr_gotoList">積込・運搬実績一覧を見る</a>`;
       okEl.classList.remove('hidden');
@@ -4945,8 +5113,9 @@ function renderTransportInput(record = null) {
         ev.preventDefault(); navigateTo('transport-list');
       });
       if (!isEdit) {
-        // 続けて登録できるようフォームをリセット (人員は残す)
-        document.getElementById('tr_qty').value = '';
+        // 続けて登録できるようフォームをリセット (人員は残す、車両明細は空1行に戻す)
+        vehicles = [{ vehicle_name: '', quantity: '' }];
+        renderTrVehicleList();
       }
     } catch (err) {
       // 楽観ロック競合 (409 + conflict:true) - 他ユーザー/他タブが先に更新した
@@ -4975,7 +5144,9 @@ function renderTransportInput(record = null) {
             transportState.editingUpdatedAt = saved.updated_at || null;
             okEl.innerHTML = `<i class="fas fa-check-circle mr-1"></i>登録しました (ID: ${saved.id})`;
             okEl.classList.remove('hidden');
-            document.getElementById('tr_qty').value = '';
+            // 続けて登録できるよう車両明細を空1行にリセット (人員は残す)
+            vehicles = [{ vehicle_name: '', quantity: '' }];
+            renderTrVehicleList();
           } catch (err2) {
             showTrErr(errEl, err2.message || String(err2));
           } finally {
@@ -5131,11 +5302,28 @@ function renderTrListTable(records) {
   }
 
   const isAdmin = state.user?.role === 'admin';
-  // デスクトップ表: table / モバイル: カード表示
+  // 車両明細を「車両名:数量kg」形式で改行区切り (デスクトップ) / スラッシュ区切り (モバイル) に整形。
+  // sort_order でソートされたサーバ側の順序をそのまま使用する。
+  // 明細が無い後方互換ケースでは、旧列 vehicle / transport_quantity_kg から擬似的に1件生成する。
+  const buildVehiclesList = (r) => {
+    const items = Array.isArray(r.vehicles) && r.vehicles.length > 0
+      ? r.vehicles
+      : (r.vehicle ? [{ vehicle_name: r.vehicle, quantity: r.transport_quantity_kg }] : []);
+    return items;
+  };
+  // デスクトップ: 車両ごとに改行、モバイル: スラッシュ区切り
   const rows = records.map(r => {
     const workersStr = (r.workers || []).map(w => `${escapeHtml(w.worker_name)}(${trFmtMd(w.man_days)})`).join(', ');
-    const perMd = (Number(r.total_man_days) || 0) > 0 ? Number(r.transport_quantity_kg) / Number(r.total_man_days) : null;
-    return { r, workersStr, perMd };
+    const totalQty = Number(r.transport_quantity_kg) || 0;
+    const perMd = (Number(r.total_man_days) || 0) > 0 ? totalQty / Number(r.total_man_days) : null;
+    const items = buildVehiclesList(r);
+    const vehicleHtmlDesktop = items.length > 0
+      ? items.map(v => `<div>${escapeHtml(v.vehicle_name)}：${trFmtQty(v.quantity)}kg</div>`).join('')
+      : '<span class="text-gray-400">－</span>';
+    const vehicleHtmlMobile = items.length > 0
+      ? items.map(v => `${escapeHtml(v.vehicle_name)}：${trFmtQty(v.quantity)}kg`).join(' ／ ')
+      : '－';
+    return { r, workersStr, perMd, totalQty, vehicleHtmlDesktop, vehicleHtmlMobile, vehicleCount: items.length };
   });
 
   area.innerHTML = `
@@ -5148,21 +5336,21 @@ function renderTrListTable(records) {
             <th class="px-2 py-2">工場</th>
             <th class="px-2 py-2">積込・運搬人員 (人工)</th>
             <th class="px-2 py-2 text-right">合計人工</th>
-            <th class="px-2 py-2">積込・運搬車両</th>
-            <th class="px-2 py-2 text-right">積込・運搬数量</th>
+            <th class="px-2 py-2">積込・運搬車両 (数量)</th>
+            <th class="px-2 py-2 text-right">積込・運搬数量合計</th>
             <th class="px-2 py-2 text-right">1人工当たり</th>
             <th class="px-2 py-2 text-center">操作</th>
           </tr>
         </thead>
         <tbody>
-          ${rows.map(({r, workersStr, perMd}) => `
-            <tr class="border-t border-gray-100 hover:bg-blue-50">
+          ${rows.map(({r, workersStr, perMd, totalQty, vehicleHtmlDesktop, vehicleCount}) => `
+            <tr class="border-t border-gray-100 hover:bg-blue-50 align-top">
               <td class="px-2 py-2 whitespace-nowrap">${escapeHtml(r.transport_date)}</td>
               <td class="px-2 py-2 whitespace-nowrap">${escapeHtml(r.factory)}</td>
               <td class="px-2 py-2">${workersStr}</td>
               <td class="px-2 py-2 text-right whitespace-nowrap">${trFmtMd(r.total_man_days)}</td>
-              <td class="px-2 py-2 whitespace-nowrap">${escapeHtml(r.vehicle)}</td>
-              <td class="px-2 py-2 text-right whitespace-nowrap font-semibold">${trFmtQty(r.transport_quantity_kg)} kg</td>
+              <td class="px-2 py-2">${vehicleHtmlDesktop}${vehicleCount > 1 ? `<div class="text-xs text-gray-500 mt-1">(${vehicleCount}台)</div>` : ''}</td>
+              <td class="px-2 py-2 text-right whitespace-nowrap font-semibold">${trFmtQty(totalQty)} kg</td>
               <td class="px-2 py-2 text-right whitespace-nowrap">${perMd != null ? trFmtQty1(perMd) + ' kg' : '－'}</td>
               <td class="px-2 py-2 text-center whitespace-nowrap">
                 <button data-tr-edit="${r.id}" class="text-blue-600 hover:underline text-xs mr-1"><i class="fas fa-edit"></i>編集</button>
@@ -5176,17 +5364,17 @@ function renderTrListTable(records) {
 
     <!-- モバイル: カード -->
     <div class="md:hidden space-y-2">
-      ${rows.map(({r, workersStr, perMd}) => `
+      ${rows.map(({r, workersStr, perMd, totalQty, vehicleHtmlMobile, vehicleCount}) => `
         <div class="border border-gray-200 rounded-lg p-3 bg-white">
           <div class="flex items-center justify-between mb-2">
             <span class="font-semibold">${escapeHtml(r.transport_date)}</span>
             <span class="text-xs px-2 py-0.5 rounded ${r.factory === '本社工場' ? 'bg-blue-100 text-blue-800' : 'bg-purple-100 text-purple-800'}">${escapeHtml(r.factory)}</span>
           </div>
           <div class="text-sm space-y-1">
-            <div><span class="text-gray-500">車両:</span> ${escapeHtml(r.vehicle)}</div>
+            <div><span class="text-gray-500">車両${vehicleCount > 1 ? `(${vehicleCount}台)` : ''}:</span> ${vehicleHtmlMobile}</div>
             <div><span class="text-gray-500">人員:</span> ${workersStr}</div>
             <div><span class="text-gray-500">合計人工:</span> ${trFmtMd(r.total_man_days)} / <span class="text-gray-500">1人工当たり:</span> ${perMd != null ? trFmtQty1(perMd) + ' kg' : '－'}</div>
-            <div class="text-lg font-bold text-green-700">${trFmtQty(r.transport_quantity_kg)} kg</div>
+            <div class="text-lg font-bold text-green-700">${trFmtQty(totalQty)} kg</div>
           </div>
           <div class="mt-2 flex gap-2 justify-end">
             <button data-tr-edit="${r.id}" class="btn-secondary text-xs"><i class="fas fa-edit mr-1"></i>編集</button>
@@ -5701,22 +5889,33 @@ function trFilterLabel(params) {
 }
 
 // ---- CSV: 一覧 ----
+// 車両明細は「車両名:数量」形式でセミコロン区切りにする。
+// (カンマは CSV フィールド区切りと衝突するため使わない。trCsvEscape で "" 括られる場合も
+//  改行を含めないので Excel の行崩れは発生しない。)
+function _trVehiclesForCsv(r) {
+  const items = Array.isArray(r.vehicles) && r.vehicles.length > 0
+    ? r.vehicles
+    : (r.vehicle ? [{ vehicle_name: r.vehicle, quantity: r.transport_quantity_kg }] : []);
+  return items.map(v => `${v.vehicle_name}:${trCsvNum(v.quantity)}kg`).join('; ');
+}
 function exportTransportListCsv(records, filters) {
   const rows = [];
   rows.push([`積込・運搬実績一覧 出力条件`, trFilterLabel(filters)]);
   rows.push([]);
-  rows.push(['日付','工場','積込・運搬人員(人工)','合計人工','積込・運搬車両','積込・運搬数量(kg)','1人工当たり積込・運搬数量(kg/人工)']);
+  rows.push(['日付','工場','積込・運搬人員(人工)','合計人工','積込・運搬車両(数量)','車両数','積込・運搬数量合計(kg)','1人工当たり積込・運搬数量(kg/人工)']);
   let totQty = 0, totMd = 0;
   for (const r of records) {
     const workersStr = (r.workers || []).map(w => `${w.worker_name}(${trFmtMd(w.man_days)})`).join('; ');
     const md = Number(r.total_man_days) || 0;
     const qty = Number(r.transport_quantity_kg) || 0;
     const perMd = md > 0 ? qty / md : '';
-    rows.push([r.transport_date, r.factory, workersStr, trCsvMd(md), r.vehicle, trCsvNum(qty), perMd !== '' ? trCsvNum(perMd, 1) : '']);
+    const vehStr = _trVehiclesForCsv(r);
+    const vehCount = (Array.isArray(r.vehicles) && r.vehicles.length > 0) ? r.vehicles.length : (r.vehicle ? 1 : 0);
+    rows.push([r.transport_date, r.factory, workersStr, trCsvMd(md), vehStr, vehCount, trCsvNum(qty), perMd !== '' ? trCsvNum(perMd, 1) : '']);
     totQty += qty; totMd += md;
   }
   rows.push([]);
-  rows.push(['合計','','', trCsvMd(totMd),'', trCsvNum(totQty), totMd > 0 ? trCsvNum(totQty / totMd, 1) : '']);
+  rows.push(['合計','','', trCsvMd(totMd),'','', trCsvNum(totQty), totMd > 0 ? trCsvNum(totQty / totMd, 1) : '']);
   const fn = `積込・運搬実績一覧_${filters.dateFrom || '全期間'}_${filters.dateTo || ''}_${filters.factory === 'all' ? '全体合算' : filters.factory}.csv`;
   trCsvDownload(rows, fn);
 }
@@ -5925,6 +6124,16 @@ function trBuildKpiSummary(data) {
 }
 
 // ---- PDF: 一覧 ----
+// 車両明細を PDF セル用に整形する。
+// jsPDF autoTable の overflow:'linebreak' は '\n' を改行として扱うため、
+// 1台1行の「車両名：数量kg」形式で並べる。
+// 既存データ(車両明細未移行)は r.vehicle / r.transport_quantity_kg にフォールバック。
+function _trVehiclesForPdf(r) {
+  const items = Array.isArray(r.vehicles) && r.vehicles.length > 0
+    ? r.vehicles
+    : (r.vehicle ? [{ vehicle_name: r.vehicle, quantity: r.transport_quantity_kg }] : []);
+  return items.map(v => `${v.vehicle_name}：${trPdfNum(v.quantity)}kg`).join('\n');
+}
 async function exportTransportListPdf(records, filters) {
   const doc = await trPdfInit();
   trPdfHeader(doc, '積込・運搬実績一覧', filters);
@@ -5943,7 +6152,7 @@ async function exportTransportListPdf(records, filters) {
     return [
       r.transport_date, r.factory,
       (r.workers||[]).map(w => `${w.worker_name}(${trFmtMd(w.man_days)})`).join(', '),
-      trPdfNum(md, 3), r.vehicle,
+      trPdfNum(md, 3), _trVehiclesForPdf(r),
       trPdfNum(qty), md > 0 ? trPdfNum(qty / md, 1) : '－'
     ];
   });

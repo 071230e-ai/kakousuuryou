@@ -793,6 +793,8 @@ api.get('/analytics/workers/monthly', authMiddleware, async (c) => {
 
 const FACTORY_SET = new Set(['本社工場', '第二工場'])
 const VEHICLE_MAX_LEN = 100
+// 車両明細 (transport_vehicle_items) の vehicle_name は VEHICLE_MAX_LEN と同じ制約
+// (旧 transport_records.vehicle と統一)
 
 // 運搬人員リストの正規化。
 // 入力形式: Array<{ worker_name?: string, name?: string, man_days: number|string }>
@@ -829,6 +831,55 @@ function normalizeTransportWorkers(input: any): { workers: Array<{worker_name: s
   return { workers: out }
 }
 
+// 車両明細リストの正規化。
+// 入力形式: Array<{ vehicle_name?: string, vehicleName?: string, quantity: number|string, sort_order?: number|string }>
+// 戻り値: 有効な { vehicle_name, quantity, sort_order } のみ (完全空行はスキップ、片欠けはエラー)
+// - vehicle_name: 前後空白除去、必須、100文字以内
+// - quantity: 数値 & > 0、小数第3位で丸める
+// - sort_order: 呼び出し側で 0 起点で採番 (入力順に依存)
+function normalizeTransportVehicles(input: any): { vehicles: Array<{vehicle_name: string; quantity: number; sort_order: number}>, error?: string } {
+  if (!Array.isArray(input)) return { vehicles: [], error: '積込・運搬車両が正しくありません' }
+  const out: Array<{vehicle_name: string; quantity: number; sort_order: number}> = []
+  let order = 0
+  for (let i = 0; i < input.length; i++) {
+    const raw = input[i]
+    if (raw == null || typeof raw !== 'object') continue
+    // vehicle_name / vehicleName どちらでも受ける (JSクライアントの命名ゆれ吸収)
+    const rawName = raw.vehicle_name ?? raw.vehicleName ?? ''
+    const name = String(rawName).trim()
+    const rawQty = raw.quantity
+    const hasName = !!name
+    const hasQty = !(rawQty === '' || rawQty == null)
+    // 完全空行はスキップ (UI で入力途中の空行を許容するため)
+    if (!hasName && !hasQty) continue
+    // 片欠けはエラー
+    if (!hasName) {
+      return { vehicles: [], error: `${i + 1}行目: 積込・運搬車両を入力してください` }
+    }
+    if (name.length > VEHICLE_MAX_LEN) {
+      return { vehicles: [], error: `${i + 1}行目: 積込・運搬車両は ${VEHICLE_MAX_LEN} 文字以内で入力してください` }
+    }
+    if (!hasQty) {
+      return { vehicles: [], error: `${i + 1}行目 "${name}": 積込・運搬数量を入力してください` }
+    }
+    const qtyNum = Number(rawQty)
+    if (!isFinite(qtyNum)) {
+      return { vehicles: [], error: `${i + 1}行目 "${name}": 積込・運搬数量が数値ではありません` }
+    }
+    if (qtyNum <= 0) {
+      return { vehicles: [], error: `${i + 1}行目 "${name}": 積込・運搬数量は0より大きい値を指定してください` }
+    }
+    // 小数第3位で丸める (Math.round × 1000 / 1000 で浮動小数誤差を避ける)
+    const qty = Math.round(qtyNum * 1000) / 1000
+    out.push({ vehicle_name: name, quantity: qty, sort_order: order })
+    order++
+  }
+  if (out.length === 0) {
+    return { vehicles: [], error: '積込・運搬車両を1件以上入力してください' }
+  }
+  return { vehicles: out }
+}
+
 // workers マスタに存在しない名前をまとめて INSERT OR IGNORE → 全名前の id を解決
 async function resolveWorkerIds(db: D1Database, names: string[]): Promise<Record<string, number | null>> {
   const uniq = Array.from(new Set(names.filter(n => !!n)))
@@ -862,15 +913,69 @@ async function loadTransportWorkers(db: D1Database, recordId: number) {
   }))
 }
 
-function enrichTransportRecord(r: any, workers: any[]) {
+// 運搬レコードに紐付く車両明細を sort_order 順で取得。
+// DB は quantity_milli_kg (INTEGER, kg × 1000) で保存されているため、
+// API/UI に返す quantity (kg) は /1000 で復元する。
+// これにより 0.1 + 0.2 = 0.30000000000000004 のような IEEE754 誤差を DB 側で完全に排除できる。
+async function loadTransportVehicles(db: D1Database, recordId: number) {
+  const { results } = await db.prepare(`
+    SELECT id, vehicle_name, quantity_milli_kg, sort_order
+    FROM transport_vehicle_items
+    WHERE transport_record_id = ?
+    ORDER BY sort_order ASC, id ASC
+  `).bind(recordId).all()
+  return (results as any[]).map(r => {
+    const milli = Number(r.quantity_milli_kg) || 0
+    return {
+      id: Number(r.id),
+      vehicle_name: String(r.vehicle_name),
+      quantity: milli / 1000,           // kg (小数第3位まで完全精度)
+      quantity_milli_kg: milli,          // 内部値も返す (デバッグ・詳細合計用)
+      sort_order: Number(r.sort_order) || 0
+    }
+  })
+}
+
+// 数量の合計を車両明細から計算し、無ければ後方互換で旧列 transport_quantity_kg を使う。
+// quantity_milli_kg (INTEGER) が付いていればそれを、無ければ Math.round(quantity * 1000) を使い、
+// 整数で加算してから /1000 に戻す。JS の Number は 2^53 - 1 まで整数を安全に表現できるため
+// 現実的な業務量では桁溢れは発生しない。
+function sumVehiclesQty(vehicles: any[]): number {
+  let micro = 0
+  for (const v of vehicles) {
+    if (typeof v.quantity_milli_kg === 'number' && isFinite(v.quantity_milli_kg) && v.quantity_milli_kg > 0) {
+      micro += v.quantity_milli_kg
+    } else {
+      const q = Number(v.quantity)
+      if (isFinite(q) && q > 0) micro += Math.round(q * 1000)
+    }
+  }
+  return micro / 1000
+}
+
+// kg (数値, 小数第3位まで) → milli_kg (整数) に変換。
+// バリデーション済み前提 (>0, 有限)。第4位以下は Math.round で丸める。
+function kgToMilli(kg: number): number {
+  return Math.round(kg * 1000)
+}
+
+// レコードに人員・車両明細と派生値を付与する。
+// - 車両明細が 1 件以上あるレコード: total_quantity_kg = sum(vehicles.quantity)、旧列は参考値。
+// - 車両明細が 0 件のレコード (旧データが 0007 移行対象外だった等の想定外ケース): 旧列を使う。
+//   → 通常運用では発生しない (0007 マイグレーションで全既存レコードが移行済み)。
+function enrichTransportRecord(r: any, workers: any[], vehicles: any[]) {
   const totalMd = workers.reduce((s, w) => s + (Number(w.man_days) || 0), 0)
-  const qty = Number(r.transport_quantity_kg) || 0
+  const legacyQty = Number(r.transport_quantity_kg) || 0
+  const hasItems = Array.isArray(vehicles) && vehicles.length > 0
+  const totalQty = hasItems ? sumVehiclesQty(vehicles) : legacyQty
   return {
     ...r,
-    transport_quantity_kg: qty,
+    transport_quantity_kg: totalQty,   // フロント互換: 常に合計数量を返す
     workers,
+    vehicles,
     total_man_days: totalMd,
-    qty_per_man_day: totalMd > 0 ? qty / totalMd : 0
+    total_quantity_kg: totalQty,        // 明示名
+    qty_per_man_day: totalMd > 0 ? totalQty / totalMd : 0
   }
 }
 
@@ -901,7 +1006,14 @@ api.get('/transport-records', authMiddleware, async (c) => {
   if (year)     { sql += ' AND substr(r.transport_date,1,4) = ?'; params.push(year) }
   if (month)    { sql += ' AND substr(r.transport_date,6,2) = ?'; params.push(String(month).padStart(2,'0')) }
   if (factory && factory !== 'all') { sql += ' AND r.factory = ?'; params.push(factory) }
-  if (vehicleQ) { sql += ' AND r.vehicle LIKE ?'; params.push('%' + vehicleQ + '%') }
+  // 車両フィルタ: 旧列 r.vehicle または新明細 vehicle_name のどちらかに部分一致
+  if (vehicleQ) {
+    sql += ` AND (
+      r.vehicle LIKE ?
+      OR EXISTS (SELECT 1 FROM transport_vehicle_items tvi WHERE tvi.transport_record_id = r.id AND tvi.vehicle_name LIKE ?)
+    )`
+    params.push('%' + vehicleQ + '%', '%' + vehicleQ + '%')
+  }
   if (workerQ) {
     sql += ' AND EXISTS (SELECT 1 FROM transport_record_workers trw WHERE trw.transport_record_id = r.id AND trw.worker_name LIKE ?)'
     params.push('%' + workerQ + '%')
@@ -911,9 +1023,10 @@ api.get('/transport-records', authMiddleware, async (c) => {
   const { results } = await c.env.DB.prepare(sql).bind(...params).all()
   const rows = results as any[]
 
-  // 人員をまとめて取得 (N+1 回避のため IN 句)
+  // 人員・車両明細をまとめて取得 (N+1 回避のため IN 句)
   const ids = rows.map(r => r.id)
   let workersMap: Record<number, any[]> = {}
+  let vehiclesMap: Record<number, any[]> = {}
   if (ids.length > 0) {
     const placeholders = ids.map(() => '?').join(',')
     const { results: wrs } = await c.env.DB.prepare(`
@@ -927,20 +1040,61 @@ api.get('/transport-records', authMiddleware, async (c) => {
       if (!workersMap[rid]) workersMap[rid] = []
       workersMap[rid].push({ worker_id: w.worker_id, worker_name: w.worker_name, man_days: Number(w.man_days) || 0 })
     }
+    const { results: vrs } = await c.env.DB.prepare(`
+      SELECT id, transport_record_id, vehicle_name, quantity_milli_kg, sort_order
+      FROM transport_vehicle_items
+      WHERE transport_record_id IN (${placeholders})
+      ORDER BY transport_record_id ASC, sort_order ASC, id ASC
+    `).bind(...ids).all()
+    for (const v of (vrs as any[])) {
+      const rid = v.transport_record_id
+      if (!vehiclesMap[rid]) vehiclesMap[rid] = []
+      const milli = Number(v.quantity_milli_kg) || 0
+      vehiclesMap[rid].push({
+        id: Number(v.id),
+        vehicle_name: String(v.vehicle_name),
+        quantity: milli / 1000,           // kg (小数第3位まで完全精度)
+        quantity_milli_kg: milli,          // 内部値 (sumVehiclesQty で優先利用)
+        sort_order: Number(v.sort_order) || 0
+      })
+    }
   }
-  const enriched = rows.map(r => enrichTransportRecord(r, workersMap[r.id] || []))
+  const enriched = rows.map(r => enrichTransportRecord(r, workersMap[r.id] || [], vehiclesMap[r.id] || []))
   return c.json({ records: enriched })
 })
 
 // ---- 過去入力の車両候補 (サジェスト) ----
+// 新明細 (transport_vehicle_items.vehicle_name) と旧列 (transport_records.vehicle) の
+// 両方から DISTINCT な車両名を UNION して返す。移行済みレコードでは同じ値が両方から出るが
+// UNION により重複排除される。
 api.get('/transport-records/vehicles', authMiddleware, async (c) => {
   const user = c.get('user')
-  let sql = 'SELECT DISTINCT vehicle FROM transport_records WHERE vehicle IS NOT NULL AND vehicle != ""'
+  const isAdmin = user.role === 'admin'
+  // ユーザースコープの絞り込み (旧列側の created_by は transport_records から。
+  // 新明細側は親レコードの created_by で JOIN 絞り込む)
+  let sql: string
   const params: any[] = []
-  if (user.role !== 'admin') { sql += ' AND created_by = ?'; params.push(user.id) }
-  sql += ' ORDER BY vehicle ASC LIMIT 200'
+  if (isAdmin) {
+    sql = `
+      SELECT vehicle_name AS v FROM transport_vehicle_items WHERE vehicle_name IS NOT NULL AND vehicle_name != ''
+      UNION
+      SELECT vehicle       AS v FROM transport_records      WHERE vehicle       IS NOT NULL AND vehicle       != ''
+      ORDER BY v ASC LIMIT 200
+    `
+  } else {
+    sql = `
+      SELECT tvi.vehicle_name AS v
+        FROM transport_vehicle_items tvi
+        JOIN transport_records r ON r.id = tvi.transport_record_id
+       WHERE tvi.vehicle_name IS NOT NULL AND tvi.vehicle_name != '' AND r.created_by = ?
+      UNION
+      SELECT vehicle AS v FROM transport_records WHERE vehicle IS NOT NULL AND vehicle != '' AND created_by = ?
+      ORDER BY v ASC LIMIT 200
+    `
+    params.push(user.id, user.id)
+  }
   const { results } = await c.env.DB.prepare(sql).bind(...params).all()
-  return c.json({ vehicles: (results as any[]).map(r => r.vehicle) })
+  return c.json({ vehicles: (results as any[]).map(r => r.v) })
 })
 
 // ---- 個別取得 ----
@@ -953,7 +1107,8 @@ api.get('/transport-records/:id', authMiddleware, async (c) => {
     return c.json({ error: '権限がありません' }, 403)
   }
   const workers = await loadTransportWorkers(c.env.DB, id)
-  return c.json({ record: enrichTransportRecord(row, workers) })
+  const vehicles = await loadTransportVehicles(c.env.DB, id)
+  return c.json({ record: enrichTransportRecord(row, workers, vehicles) })
 })
 
 // ---- 新規登録 ----
@@ -968,36 +1123,58 @@ api.post('/transport-records', authMiddleware, async (c) => {
   if (!body.factory || !FACTORY_SET.has(body.factory)) {
     return c.json({ error: '工場区分は「本社工場」または「第二工場」を選択してください' }, 400)
   }
-  const vehicle = String(body.vehicle ?? '').trim()
-  if (!vehicle) return c.json({ error: '積込・運搬車両を入力してください' }, 400)
-  if (vehicle.length > VEHICLE_MAX_LEN) {
-    return c.json({ error: `積込・運搬車両は ${VEHICLE_MAX_LEN} 文字以内で入力してください` }, 400)
+
+  // 車両明細の正規化 (複数車両対応)。後方互換のため、旧 body.vehicle/body.transport_quantity_kg
+  // だけが送られてきた場合は 1 件の明細として扱う。
+  let vehiclesInput = body.vehicles
+  if (!Array.isArray(vehiclesInput) || vehiclesInput.length === 0) {
+    // レガシー互換パス: 旧単一車両フィールドを 1 件の明細に変換
+    const legacyName = String(body.vehicle ?? '').trim()
+    const legacyQty = body.transport_quantity_kg
+    if (legacyName || (legacyQty !== '' && legacyQty != null)) {
+      vehiclesInput = [{ vehicle_name: legacyName, quantity: legacyQty }]
+    } else {
+      vehiclesInput = []
+    }
   }
-  const qtyRaw = body.transport_quantity_kg
-  if (qtyRaw === '' || qtyRaw == null) {
-    return c.json({ error: '積込・運搬数量を入力してください' }, 400)
-  }
-  const qtyIn = Number(qtyRaw)
-  if (!isFinite(qtyIn)) return c.json({ error: '積込・運搬数量は数値で入力してください' }, 400)
-  if (qtyIn <= 0) return c.json({ error: '積込・運搬数量は0より大きい値を指定してください' }, 400)
-  // 運搬数量は小数第3位まで保持。それより下位は四捨五入する。
-  const qty = Math.round(qtyIn * 1000) / 1000
+  const { vehicles, error: vErr } = normalizeTransportVehicles(vehiclesInput)
+  if (vErr) return c.json({ error: vErr }, 400)
 
   const { workers, error: wErr } = normalizeTransportWorkers(body.workers)
   if (wErr) return c.json({ error: wErr }, 400)
 
-  // ------- 重複警告 (同日・同工場・同車両・同数量・同人員構成・同人工構成) -------
+  // 親レコードの vehicle / transport_quantity_kg は後方互換の派生値として保存する:
+  //   - vehicle: 1台目の車両名 (代表値)
+  //   - transport_quantity_kg: 全車両の合計 (小数第3位で丸め済)
+  // 旧クライアントや旧SQL経路が親列を参照しても矛盾しないよう更新する。
+  //
+  // 数値精度: 明細は quantity_milli_kg (INTEGER, kg × 1000) で保存するため、
+  // 合計も整数で加算してから /1000 に戻す。JS Number は 2^53-1 まで安全に整数を保持できるため、
+  // 現実的な業務量 (数百万tまで) で桁溢れは発生しない。
+  const totalMilli = vehicles.reduce((s, v) => s + kgToMilli(v.quantity), 0)
+  const totalQty = totalMilli / 1000
+  const primaryVehicle = vehicles[0].vehicle_name
+
+  // ------- 重複警告 (同日・同工場・車両明細構成・数量合計・人員構成) -------
+  // 車両明細の内容 (名前 + 数量 のセット) が完全一致かで判定する。
   if (!body.duplicateAck) {
+    const inputVehSig = JSON.stringify(
+      vehicles.map(v => ({ n: v.vehicle_name, q: v.quantity })).sort((a,b) => a.n.localeCompare(b.n) || a.q - b.q)
+    )
+    const inputWSig = JSON.stringify(workers.map(w => ({ n: w.worker_name, m: w.man_days })).sort((a,b) => a.n.localeCompare(b.n)))
+    // 同日・同工場・数量合計が一致する候補 (親の transport_quantity_kg は kg で保存する)
     const { results: dupCandidates } = await c.env.DB.prepare(`
       SELECT id FROM transport_records
-      WHERE transport_date = ? AND factory = ? AND vehicle = ? AND transport_quantity_kg = ?
-    `).bind(body.transport_date, body.factory, vehicle, qty).all()
-
-    const inputSig = JSON.stringify(workers.map(w => ({ n: w.worker_name, m: w.man_days })).sort((a,b) => a.n.localeCompare(b.n)))
+      WHERE transport_date = ? AND factory = ? AND transport_quantity_kg = ?
+    `).bind(body.transport_date, body.factory, totalQty).all()
     for (const cand of dupCandidates as any[]) {
       const w2 = await loadTransportWorkers(c.env.DB, cand.id)
-      const sig = JSON.stringify(w2.map(w => ({ n: w.worker_name, m: Number(w.man_days) })).sort((a,b) => a.n.localeCompare(b.n)))
-      if (sig === inputSig) {
+      const v2 = await loadTransportVehicles(c.env.DB, cand.id)
+      const wSig = JSON.stringify(w2.map(w => ({ n: w.worker_name, m: Number(w.man_days) })).sort((a,b) => a.n.localeCompare(b.n)))
+      const vSig = JSON.stringify(
+        v2.map(v => ({ n: v.vehicle_name, q: Number(v.quantity) })).sort((a,b) => a.n.localeCompare(b.n) || a.q - b.q)
+      )
+      if (wSig === inputWSig && vSig === inputVehSig) {
         return c.json({
           error: '同じ内容の積込・運搬記録が既に登録されています。それでも登録する場合は「はい」を押してください。',
           duplicate: true,
@@ -1007,53 +1184,59 @@ api.post('/transport-records', authMiddleware, async (c) => {
     }
   }
 
-  // ------- 一体的な登録 (本体 + 人員) : D1 batch() による単一トランザクション -------
+  // ------- 一体的な登録 (本体 + 人員 + 車両明細) : D1 batch() による単一トランザクション -------
   // batch() は Cloudflare D1 の公式トランザクションAPIで、渡した全ステートメントが
   // 単一の暗黙 BEGIN/COMMIT で実行される。途中で1つでも失敗すれば全体が ROLLBACK される。
-  // https://developers.cloudflare.com/d1/best-practices/use-d1-with-hono/#transactions
   try {
-    // 1) workers マスタを batch で upsert（外部トランザクション。ここでの部分成功はマスタなので許容）
+    // 1) workers マスタを batch で upsert（マスタなので部分成功は許容）
     const nameToId = await resolveWorkerIds(c.env.DB, workers.map(w => w.worker_name))
 
     // 2) 本体 INSERT を実行して last_row_id を取得（batch では前段の結果を bind に流し込めないため）
-    //    ここで失敗した場合は本体も人員も一切残らない（本体INSERT前）
     const insertRes = await c.env.DB.prepare(`
       INSERT INTO transport_records (transport_date, factory, vehicle, transport_quantity_kg, created_by)
       VALUES (?, ?, ?, ?, ?)
-    `).bind(body.transport_date, body.factory, vehicle, qty, user.id).run()
+    `).bind(body.transport_date, body.factory, primaryVehicle, totalQty, user.id).run()
     const recordId = Number(insertRes.meta.last_row_id)
 
-    // 3) 人員 INSERT を batch でまとめて1トランザクション実行
-    //    全 INSERT が成功したら COMMIT、1つでも失敗（例：UNIQUE違反、CHECK違反）したら
-    //    全 INSERT が ROLLBACK される。ただし前段 2) の本体 INSERT は既に COMMIT 済みのため、
-    //    そのまま残る。→ 補償として本体を DELETE してロールバック相当にする。
+    // 3) 人員 INSERT + 車両明細 INSERT を 1 つの batch にまとめる。
+    //    どれか 1 つでも失敗すれば全体 ROLLBACK。ただし 2) の本体は既に COMMIT 済みのため、
+    //    補償として本体を DELETE する (CASCADE で子側も一括削除される)。
     try {
-      if (workers.length > 0) {
-        await c.env.DB.batch(workers.map(w =>
+      const stmts = [
+        ...workers.map(w =>
           c.env.DB.prepare(`
             INSERT INTO transport_record_workers (transport_record_id, worker_id, worker_name, man_days)
             VALUES (?, ?, ?, ?)
           `).bind(recordId, nameToId[w.worker_name] ?? null, w.worker_name, w.man_days)
-        ))
+        ),
+        ...vehicles.map(v =>
+          c.env.DB.prepare(`
+            INSERT INTO transport_vehicle_items (transport_record_id, vehicle_name, quantity_milli_kg, sort_order)
+            VALUES (?, ?, ?, ?)
+          `).bind(recordId, v.vehicle_name, kgToMilli(v.quantity), v.sort_order)
+        )
+      ]
+      if (stmts.length > 0) {
+        await c.env.DB.batch(stmts)
       }
     } catch (e: any) {
-      // 補償: 本体 DELETE。CASCADE により人員側も自動削除される。
-      // 補償自体が失敗した場合は 500 を返し、管理者に整合性確認を促す。
+      // 補償: 本体 DELETE。CASCADE で人員・車両明細も自動削除される。
       try {
         await c.env.DB.prepare('DELETE FROM transport_records WHERE id = ?').bind(recordId).run()
       } catch (e2: any) {
         return c.json({
-          error: `積込・運搬人員の保存に失敗し、本体の巻き戻しにも失敗しました。管理者に連絡してください (recordId=${recordId})`,
+          error: `明細の保存に失敗し、本体の巻き戻しにも失敗しました。管理者に連絡してください (recordId=${recordId})`,
           detail: e?.message || String(e),
           rollbackError: e2?.message || String(e2)
         }, 500)
       }
-      return c.json({ error: '積込・運搬人員の保存に失敗しました: ' + (e?.message || String(e)) }, 500)
+      return c.json({ error: '明細の保存に失敗しました: ' + (e?.message || String(e)) }, 500)
     }
 
     const w2 = await loadTransportWorkers(c.env.DB, recordId)
+    const v2 = await loadTransportVehicles(c.env.DB, recordId)
     const row = await c.env.DB.prepare('SELECT * FROM transport_records WHERE id = ?').bind(recordId).first()
-    return c.json({ record: enrichTransportRecord(row, w2) })
+    return c.json({ record: enrichTransportRecord(row, w2, v2) })
   } catch (e: any) {
     return c.json({ error: '登録に失敗しました: ' + (e?.message || String(e)) }, 500)
   }
@@ -1085,49 +1268,65 @@ api.put('/transport-records/:id', authMiddleware, async (c) => {
   if (!body.factory || !FACTORY_SET.has(body.factory)) {
     return c.json({ error: '工場区分は「本社工場」または「第二工場」を選択してください' }, 400)
   }
-  const vehicle = String(body.vehicle ?? '').trim()
-  if (!vehicle) return c.json({ error: '積込・運搬車両を入力してください' }, 400)
-  if (vehicle.length > VEHICLE_MAX_LEN) return c.json({ error: `積込・運搬車両は ${VEHICLE_MAX_LEN} 文字以内で入力してください` }, 400)
-  const qtyIn = Number(body.transport_quantity_kg)
-  if (!isFinite(qtyIn) || qtyIn <= 0) return c.json({ error: '積込・運搬数量は0より大きい数値を指定してください' }, 400)
-  // 運搬数量は小数第3位まで保持
-  const qty = Math.round(qtyIn * 1000) / 1000
+
+  // 車両明細の正規化。旧単一車両フィールドしかない古いクライアントとの互換性を維持。
+  let vehiclesInput = body.vehicles
+  if (!Array.isArray(vehiclesInput) || vehiclesInput.length === 0) {
+    const legacyName = String(body.vehicle ?? '').trim()
+    const legacyQty = body.transport_quantity_kg
+    if (legacyName || (legacyQty !== '' && legacyQty != null)) {
+      vehiclesInput = [{ vehicle_name: legacyName, quantity: legacyQty }]
+    } else {
+      vehiclesInput = []
+    }
+  }
+  const { vehicles, error: vErr } = normalizeTransportVehicles(vehiclesInput)
+  if (vErr) return c.json({ error: vErr }, 400)
 
   const { workers, error: wErr } = normalizeTransportWorkers(body.workers)
   if (wErr) return c.json({ error: wErr }, 400)
 
+  const totalMilli = vehicles.reduce((s, v) => s + kgToMilli(v.quantity), 0)
+  const totalQty = totalMilli / 1000
+  const primaryVehicle = vehicles[0].vehicle_name
+
   // ------- 更新: D1 batch() による単一トランザクション -------
-  // 本体UPDATE + 既存人員DELETE + 新人員INSERT を batch でまとめて実行。
-  // 1つでも失敗すれば全体が ROLLBACK され、元データは完全にそのまま残る。
+  // 本体UPDATE + 既存人員DELETE + 新人員INSERT + 既存車両明細DELETE + 新車両明細INSERT
+  // を batch でまとめて実行。1つでも失敗すれば全体が ROLLBACK され、元データはそのまま残る。
   try {
-    // 1) workers マスタ upsert（別トランザクション。マスタなので部分成功は問題なし）
     const nameToId = await resolveWorkerIds(c.env.DB, workers.map(w => w.worker_name))
 
-    // 2) 本体更新 + 中間テーブル入れ替えを1つの batch にまとめる
     const stmts = [
       c.env.DB.prepare(`
         UPDATE transport_records SET
           transport_date = ?, factory = ?, vehicle = ?, transport_quantity_kg = ?,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).bind(body.transport_date, body.factory, vehicle, qty, id),
+      `).bind(body.transport_date, body.factory, primaryVehicle, totalQty, id),
       c.env.DB.prepare('DELETE FROM transport_record_workers WHERE transport_record_id = ?').bind(id),
       ...workers.map(w =>
         c.env.DB.prepare(`
           INSERT INTO transport_record_workers (transport_record_id, worker_id, worker_name, man_days)
           VALUES (?, ?, ?, ?)
         `).bind(id, nameToId[w.worker_name] ?? null, w.worker_name, w.man_days)
+      ),
+      c.env.DB.prepare('DELETE FROM transport_vehicle_items WHERE transport_record_id = ?').bind(id),
+      ...vehicles.map(v =>
+        c.env.DB.prepare(`
+          INSERT INTO transport_vehicle_items (transport_record_id, vehicle_name, quantity_milli_kg, sort_order)
+          VALUES (?, ?, ?, ?)
+        `).bind(id, v.vehicle_name, kgToMilli(v.quantity), v.sort_order)
       )
     ]
     await c.env.DB.batch(stmts)
   } catch (e: any) {
-    // batch 全体が ROLLBACK されているため元データは無傷。エラーだけ返す。
     return c.json({ error: '更新に失敗しました。データは変更されていません: ' + (e?.message || String(e)) }, 500)
   }
 
   const w2 = await loadTransportWorkers(c.env.DB, id)
+  const v2 = await loadTransportVehicles(c.env.DB, id)
   const row = await c.env.DB.prepare('SELECT * FROM transport_records WHERE id = ?').bind(id).first()
-  return c.json({ record: enrichTransportRecord(row, w2) })
+  return c.json({ record: enrichTransportRecord(row, w2, v2) })
 })
 
 // ---- 削除 (admin のみ / 既存の加工削除と同一ポリシー) ----
@@ -1169,20 +1368,27 @@ api.get('/analytics/transport/daily', authMiddleware, async (c) => {
   const { where, params } = buildTransportFilterSql(url, 'r')
 
   // 記録単位で集計 (件数 = 記録数、数量 = SUM(kg)、人工 = SUM(sum(man_days)))
-  // 人工は「その記録の合計人工」の日別合計 → サブクエリで先に記録ごとに集計
+  // 数量は車両明細 (transport_vehicle_items) の合計を優先し、明細が無ければ旧列で後方互換。
+  // 人員も車両も親レコード単位で先に集計してから JOIN することで、
+  // 車両数 × 人員数 の重複行が発生することを防ぐ。
   const sql = `
     SELECT r.transport_date AS date,
-           SUM(r.transport_quantity_kg) AS total_qty,
+           SUM(COALESCE(rec_qty.qty_sum, r.transport_quantity_kg)) AS total_qty,
            SUM(rec_md.md_sum)           AS total_man_days,
            COUNT(*)                     AS record_count,
-           SUM(CASE WHEN r.factory = '本社工場' THEN r.transport_quantity_kg ELSE 0 END) AS honsha_qty,
-           SUM(CASE WHEN r.factory = '第二工場' THEN r.transport_quantity_kg ELSE 0 END) AS dai2_qty
+           SUM(CASE WHEN r.factory = '本社工場' THEN COALESCE(rec_qty.qty_sum, r.transport_quantity_kg) ELSE 0 END) AS honsha_qty,
+           SUM(CASE WHEN r.factory = '第二工場' THEN COALESCE(rec_qty.qty_sum, r.transport_quantity_kg) ELSE 0 END) AS dai2_qty
       FROM transport_records r
       LEFT JOIN (
         SELECT transport_record_id, SUM(man_days) AS md_sum
           FROM transport_record_workers
          GROUP BY transport_record_id
       ) rec_md ON rec_md.transport_record_id = r.id
+      LEFT JOIN (
+        SELECT transport_record_id, SUM(quantity_milli_kg)/1000.0 AS qty_sum
+          FROM transport_vehicle_items
+         GROUP BY transport_record_id
+      ) rec_qty ON rec_qty.transport_record_id = r.id
      WHERE 1=1 ${where}
      GROUP BY r.transport_date
      ORDER BY r.transport_date ASC
@@ -1213,17 +1419,22 @@ api.get('/analytics/transport/monthly', authMiddleware, async (c) => {
 
   const sql = `
     SELECT substr(r.transport_date,1,7) AS ym,
-           SUM(r.transport_quantity_kg) AS total_qty,
+           SUM(COALESCE(rec_qty.qty_sum, r.transport_quantity_kg)) AS total_qty,
            SUM(rec_md.md_sum)           AS total_man_days,
            COUNT(*)                     AS record_count,
-           SUM(CASE WHEN r.factory = '本社工場' THEN r.transport_quantity_kg ELSE 0 END) AS honsha_qty,
-           SUM(CASE WHEN r.factory = '第二工場' THEN r.transport_quantity_kg ELSE 0 END) AS dai2_qty
+           SUM(CASE WHEN r.factory = '本社工場' THEN COALESCE(rec_qty.qty_sum, r.transport_quantity_kg) ELSE 0 END) AS honsha_qty,
+           SUM(CASE WHEN r.factory = '第二工場' THEN COALESCE(rec_qty.qty_sum, r.transport_quantity_kg) ELSE 0 END) AS dai2_qty
       FROM transport_records r
       LEFT JOIN (
         SELECT transport_record_id, SUM(man_days) AS md_sum
           FROM transport_record_workers
          GROUP BY transport_record_id
       ) rec_md ON rec_md.transport_record_id = r.id
+      LEFT JOIN (
+        SELECT transport_record_id, SUM(quantity_milli_kg)/1000.0 AS qty_sum
+          FROM transport_vehicle_items
+         GROUP BY transport_record_id
+      ) rec_qty ON rec_qty.transport_record_id = r.id
      WHERE 1=1 ${where}
      GROUP BY ym
      ORDER BY ym ASC
@@ -1259,17 +1470,22 @@ api.get('/analytics/transport/yearly', authMiddleware, async (c) => {
   // 年別集計 + 前年比
   const sqlYear = `
     SELECT substr(r.transport_date,1,4) AS year,
-           SUM(r.transport_quantity_kg) AS total_qty,
+           SUM(COALESCE(rec_qty.qty_sum, r.transport_quantity_kg)) AS total_qty,
            SUM(rec_md.md_sum)           AS total_man_days,
            COUNT(*)                     AS record_count,
-           SUM(CASE WHEN r.factory = '本社工場' THEN r.transport_quantity_kg ELSE 0 END) AS honsha_qty,
-           SUM(CASE WHEN r.factory = '第二工場' THEN r.transport_quantity_kg ELSE 0 END) AS dai2_qty
+           SUM(CASE WHEN r.factory = '本社工場' THEN COALESCE(rec_qty.qty_sum, r.transport_quantity_kg) ELSE 0 END) AS honsha_qty,
+           SUM(CASE WHEN r.factory = '第二工場' THEN COALESCE(rec_qty.qty_sum, r.transport_quantity_kg) ELSE 0 END) AS dai2_qty
       FROM transport_records r
       LEFT JOIN (
         SELECT transport_record_id, SUM(man_days) AS md_sum
           FROM transport_record_workers
          GROUP BY transport_record_id
       ) rec_md ON rec_md.transport_record_id = r.id
+      LEFT JOIN (
+        SELECT transport_record_id, SUM(quantity_milli_kg)/1000.0 AS qty_sum
+          FROM transport_vehicle_items
+         GROUP BY transport_record_id
+      ) rec_qty ON rec_qty.transport_record_id = r.id
      WHERE 1=1 ${where}
      GROUP BY year
      ORDER BY year ASC
@@ -1297,7 +1513,7 @@ api.get('/analytics/transport/yearly', authMiddleware, async (c) => {
   // 月別推移: 同じフィルタ (year フィルタは URL に含めない場合、全期間の月別推移になる)
   const sqlMonthly = `
     SELECT substr(r.transport_date,1,7) AS ym,
-           SUM(r.transport_quantity_kg) AS total_qty,
+           SUM(COALESCE(rec_qty.qty_sum, r.transport_quantity_kg)) AS total_qty,
            SUM(rec_md.md_sum)           AS total_man_days,
            COUNT(*)                     AS record_count
       FROM transport_records r
@@ -1306,6 +1522,11 @@ api.get('/analytics/transport/yearly', authMiddleware, async (c) => {
           FROM transport_record_workers
          GROUP BY transport_record_id
       ) rec_md ON rec_md.transport_record_id = r.id
+      LEFT JOIN (
+        SELECT transport_record_id, SUM(quantity_milli_kg)/1000.0 AS qty_sum
+          FROM transport_vehicle_items
+         GROUP BY transport_record_id
+      ) rec_qty ON rec_qty.transport_record_id = r.id
      WHERE 1=1 ${where}
      GROUP BY ym
      ORDER BY ym ASC
@@ -1332,12 +1553,15 @@ api.get('/analytics/transport/workers', authMiddleware, async (c) => {
   const { where, params } = buildTransportFilterSql(url, 'r')
   const workerQ = url.searchParams.get('worker') || url.searchParams.get('worker_name') || ''
 
-  // 各記録ごとの合計人工を得た上で、
+  // 各記録ごとの合計人工と合計数量 (車両明細の合計) を得た上で、
   //   人員別按分数量 = 記録の運搬数量 × その人員の man_days / 記録の合計人工
+  // 数量は車両明細の合計を優先し、明細が無ければ旧列で後方互換。
+  // rec_md / rec_qty を親レコード単位で先に集計してから JOIN することで、
+  // 車両数 × 人員数 の重複行が発生することを防ぐ。
   const sql = `
     SELECT trw.worker_name AS worker_name,
            trw.man_days     AS man_days,
-           r.transport_quantity_kg AS record_qty,
+           COALESCE(rec_qty.qty_sum, r.transport_quantity_kg) AS record_qty,
            r.transport_date AS date,
            r.factory        AS factory,
            r.id             AS record_id,
@@ -1349,6 +1573,11 @@ api.get('/analytics/transport/workers', authMiddleware, async (c) => {
           FROM transport_record_workers
          GROUP BY transport_record_id
       ) rec_md ON rec_md.transport_record_id = r.id
+      LEFT JOIN (
+        SELECT transport_record_id, SUM(quantity_milli_kg)/1000.0 AS qty_sum
+          FROM transport_vehicle_items
+         GROUP BY transport_record_id
+      ) rec_qty ON rec_qty.transport_record_id = r.id
      WHERE 1=1 ${where}
        ${workerQ ? 'AND trw.worker_name LIKE ?' : ''}
   `
