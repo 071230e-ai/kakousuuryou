@@ -6,6 +6,8 @@ import { login, logout, authMiddleware, requireAdmin } from './auth'
 
 const api = new Hono<{ Bindings: Bindings; Variables: { user: User } }>()
 
+const FACTORY_SET = new Set(['本社工場', '第二工場'])
+
 // ==== 認証 ====
 api.post('/auth/login', async (c) => {
   const body = await c.req.json<{ username: string; password: string }>()
@@ -180,16 +182,31 @@ async function upsertWorker(db: D1Database, name: string): Promise<number | null
   }
 }
 
-// 加工記録に対する人員リレーションを書き直し (man_days込み)
-async function rewriteRecordWorkers(db: D1Database, recordId: number, date: string, factory: string, workers: Array<{name: string, man_days: number}>) {
-  await db.prepare('DELETE FROM processing_record_workers WHERE processing_record_id = ?').bind(recordId).run()
-  for (const w of workers) {
-    const wid = await upsertWorker(db, w.name)
-    await db.prepare(`
+// 加工記録に対する人員リレーションを書き直すステートメント群 (man_days込み)
+// 呼び出し側で本体の UPDATE 等と一緒に batch() し、単一トランザクションで実行する
+async function buildRewriteRecordWorkersStmts(db: D1Database, recordId: number, date: string, factory: string, workers: Array<{name: string, man_days: number}>): Promise<D1PreparedStatement[]> {
+  const ids: Array<number | null> = []
+  for (const w of workers) ids.push(await upsertWorker(db, w.name))
+  return [
+    db.prepare('DELETE FROM processing_record_workers WHERE processing_record_id = ?').bind(recordId),
+    ...workers.map((w, i) => db.prepare(`
       INSERT INTO processing_record_workers (processing_record_id, worker_id, worker_name, factory, date, man_days)
       VALUES (?, ?, ?, ?, ?, ?)
-    `).bind(recordId, wid, w.name, factory, date, w.man_days).run()
-  }
+    `).bind(recordId, ids[i], w.name, factory, date, w.man_days))
+  ]
+}
+
+// 加工実績の日付・工場の検証
+function validateRecordKey(body: any): string | null {
+  if (!body.date || !body.factory) return '日付と工場区分は必須です'
+  if (typeof body.date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(body.date)) return '日付の形式が正しくありません'
+  if (!FACTORY_SET.has(body.factory)) return '工場区分は「本社工場」または「第二工場」を選択してください'
+  return null
+}
+
+// 日本時間 (JST) の今日 'YYYY-MM-DD'
+function todayJst(): string {
+  return new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10)
 }
 
 function parseStoredWorkerNames(v: any): string[] {
@@ -291,9 +308,8 @@ api.get('/records/:id', authMiddleware, async (c) => {
 api.post('/records', authMiddleware, async (c) => {
   const user = c.get('user')
   const body = await c.req.json<any>()
-  if (!body.date || !body.factory) {
-    return c.json({ error: '日付と工場区分は必須です' }, 400)
-  }
+  const keyErr = validateRecordKey(body)
+  if (keyErr) return c.json({ error: keyErr }, 400)
 
   // 重複チェック
   const dup = await c.env.DB.prepare('SELECT id FROM processing_records WHERE date = ? AND factory = ?')
@@ -330,7 +346,13 @@ api.post('/records', authMiddleware, async (c) => {
 
   const recordId = Number(result.meta.last_row_id)
   if (workers.length) {
-    await rewriteRecordWorkers(c.env.DB, recordId, body.date, body.factory, workers)
+    try {
+      await c.env.DB.batch(await buildRewriteRecordWorkersStmts(c.env.DB, recordId, body.date, body.factory, workers))
+    } catch (e: any) {
+      // 補償: 人員の保存に失敗したら本体も取り消す
+      await c.env.DB.prepare('DELETE FROM processing_records WHERE id = ?').bind(recordId).run()
+      return c.json({ error: '人員の保存に失敗しました: ' + (e?.message || String(e)) }, 500)
+    }
   }
 
   return c.json({ id: recordId, total_qty, qty_per_person, staff_count: staffCount, worker_names: workerNamesArr, workers })
@@ -346,6 +368,14 @@ api.put('/records/:id', authMiddleware, async (c) => {
   if (user.role !== 'admin' && (existing as any).created_by !== user.id) {
     return c.json({ error: '権限がありません' }, 403)
   }
+  const keyErr = validateRecordKey(body)
+  if (keyErr) return c.json({ error: keyErr }, 400)
+  // 日付・工場を変更した結果、別レコードと重複しないか
+  const dup = await c.env.DB.prepare('SELECT id FROM processing_records WHERE date = ? AND factory = ? AND id != ?')
+    .bind(body.date, body.factory, id).first()
+  if (dup) {
+    return c.json({ error: `${body.date} の ${body.factory} のデータは既に登録されています (ID: ${(dup as any).id})` }, 409)
+  }
   const workers = normalizeWorkers(body.workers, body.worker_names)
   const manDaysSum = workers.reduce((s, w) => s + (Number(w.man_days) || 0), 0)
   const staffCount = workers.length > 0 ? manDaysSum : (Number(body.staff_count) || 0)
@@ -355,7 +385,7 @@ api.put('/records/:id', authMiddleware, async (c) => {
 
   const trailerCount = Math.max(0, Number(body.trailer_count) || 0)
   const processTransportMd = normalizeProcessTransportMd(body.process_transport_man_days)
-  await c.env.DB.prepare(`
+  const updateStmt = c.env.DB.prepare(`
     UPDATE processing_records SET
       date=?, factory=?, staff_count=?, foundation_qty=?, base_qty=?, column_qty=?, beam_qty=?,
       fukashi_qty=?, slab_qty=?, doma_qty=?, civil_qty=?, wooden_qty=?, other_qty=?,
@@ -373,9 +403,17 @@ api.put('/records/:id', authMiddleware, async (c) => {
     trailerCount,
     processTransportMd,
     id
-  ).run()
+  )
 
-  await rewriteRecordWorkers(c.env.DB, Number(id), body.date, body.factory, workers)
+  // 本体 UPDATE と人員の書き直しを単一トランザクションで実行
+  try {
+    await c.env.DB.batch([
+      updateStmt,
+      ...await buildRewriteRecordWorkersStmts(c.env.DB, Number(id), body.date, body.factory, workers)
+    ])
+  } catch (e: any) {
+    return c.json({ error: '更新に失敗しました。データは変更されていません: ' + (e?.message || String(e)) }, 500)
+  }
 
   return c.json({ ok: true, total_qty, qty_per_person, staff_count: staffCount, worker_names: workerNamesArr, workers })
 })
@@ -383,8 +421,10 @@ api.put('/records/:id', authMiddleware, async (c) => {
 // 削除 (管理者のみ)
 api.delete('/records/:id', authMiddleware, requireAdmin, async (c) => {
   const id = c.req.param('id')
-  await c.env.DB.prepare('DELETE FROM processing_record_workers WHERE processing_record_id = ?').bind(id).run()
-  await c.env.DB.prepare('DELETE FROM processing_records WHERE id = ?').bind(id).run()
+  await c.env.DB.batch([
+    c.env.DB.prepare('DELETE FROM processing_record_workers WHERE processing_record_id = ?').bind(id),
+    c.env.DB.prepare('DELETE FROM processing_records WHERE id = ?').bind(id)
+  ])
   return c.json({ ok: true })
 })
 
@@ -531,7 +571,7 @@ api.get('/analytics/yearly', authMiddleware, async (c) => {
 
 // ダッシュボード用集計
 api.get('/analytics/dashboard', authMiddleware, async (c) => {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = todayJst()
   const ym = today.slice(0, 7)
   const year = today.slice(0, 4)
 
@@ -763,7 +803,7 @@ api.get('/analytics/parts-per-manday', authMiddleware, async (c) => {
 // 月別 × 人員別 (推移グラフ用) — man_days考慮
 api.get('/analytics/workers/monthly', authMiddleware, async (c) => {
   const url = new URL(c.req.url)
-  const year = url.searchParams.get('year') || String(new Date().getFullYear())
+  const year = url.searchParams.get('year') || todayJst().slice(0, 4)
   const factory = url.searchParams.get('factory') || 'all'
   const workerNameFilter = url.searchParams.get('worker') || url.searchParams.get('worker_name') || ''
 
@@ -791,8 +831,9 @@ api.get('/analytics/workers/monthly', authMiddleware, async (c) => {
 //  - 既存 processing_records には触れない
 // ============================================================================
 
-const FACTORY_SET = new Set(['本社工場', '第二工場'])
 const VEHICLE_MAX_LEN = 100
+// Cloudflare D1 の 1 クエリあたりのバインドパラメータ上限
+const D1_MAX_BIND_PARAMS = 100
 // 車両明細 (transport_vehicle_items) の vehicle_name は VEHICLE_MAX_LEN と同じ制約
 // (旧 transport_records.vehicle と統一)
 
@@ -888,13 +929,16 @@ async function resolveWorkerIds(db: D1Database, names: string[]): Promise<Record
   await db.batch(uniq.map(n =>
     db.prepare('INSERT OR IGNORE INTO workers (name) VALUES (?)').bind(n)
   ))
-  const placeholders = uniq.map(() => '?').join(',')
-  const { results } = await db.prepare(
-    `SELECT id, name FROM workers WHERE name IN (${placeholders})`
-  ).bind(...uniq).all()
   const map: Record<string, number | null> = {}
   for (const n of uniq) map[n] = null
-  for (const r of (results as any[])) map[r.name] = Number(r.id)
+  for (let i = 0; i < uniq.length; i += D1_MAX_BIND_PARAMS) {
+    const chunk = uniq.slice(i, i + D1_MAX_BIND_PARAMS)
+    const placeholders = chunk.map(() => '?').join(',')
+    const { results } = await db.prepare(
+      `SELECT id, name FROM workers WHERE name IN (${placeholders})`
+    ).bind(...chunk).all()
+    for (const r of (results as any[])) map[r.name] = Number(r.id)
+  }
   return map
 }
 
@@ -1024,17 +1068,19 @@ api.get('/transport-records', authMiddleware, async (c) => {
   const rows = results as any[]
 
   // 人員・車両明細をまとめて取得 (N+1 回避のため IN 句)
+  // D1 はバインドパラメータが 1 クエリ 100 個までのため、ID を分割して取得する
   const ids = rows.map(r => r.id)
   let workersMap: Record<number, any[]> = {}
   let vehiclesMap: Record<number, any[]> = {}
-  if (ids.length > 0) {
-    const placeholders = ids.map(() => '?').join(',')
+  for (let i = 0; i < ids.length; i += D1_MAX_BIND_PARAMS) {
+    const chunk = ids.slice(i, i + D1_MAX_BIND_PARAMS)
+    const placeholders = chunk.map(() => '?').join(',')
     const { results: wrs } = await c.env.DB.prepare(`
       SELECT transport_record_id, worker_id, worker_name, man_days
       FROM transport_record_workers
       WHERE transport_record_id IN (${placeholders})
       ORDER BY id ASC
-    `).bind(...ids).all()
+    `).bind(...chunk).all()
     for (const w of (wrs as any[])) {
       const rid = w.transport_record_id
       if (!workersMap[rid]) workersMap[rid] = []
@@ -1045,7 +1091,7 @@ api.get('/transport-records', authMiddleware, async (c) => {
       FROM transport_vehicle_items
       WHERE transport_record_id IN (${placeholders})
       ORDER BY transport_record_id ASC, sort_order ASC, id ASC
-    `).bind(...ids).all()
+    `).bind(...chunk).all()
     for (const v of (vrs as any[])) {
       const rid = v.transport_record_id
       if (!vehiclesMap[rid]) vehiclesMap[rid] = []
