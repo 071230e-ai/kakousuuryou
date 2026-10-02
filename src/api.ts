@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 import type { Bindings, User } from './types'
 import { PART_KEYS } from './types'
-import { login, logout, authMiddleware, requireAdmin } from './auth'
+import { login, logout, authMiddleware, requireAdmin, hashPassword, verifyPassword } from './auth'
 
 const api = new Hono<{ Bindings: Bindings; Variables: { user: User } }>()
 
@@ -37,6 +37,72 @@ api.post('/auth/logout', async (c) => {
 
 api.get('/auth/me', authMiddleware, (c) => {
   return c.json({ user: c.get('user') })
+})
+
+// ==== パスワード・ユーザー管理 ====
+const PASSWORD_MIN_LEN = 8
+
+function validateNewPassword(pw: any): string | null {
+  if (typeof pw !== 'string' || pw.length < PASSWORD_MIN_LEN) return `パスワードは${PASSWORD_MIN_LEN}文字以上で入力してください`
+  if (pw.length > 128) return 'パスワードは128文字以内で入力してください'
+  return null
+}
+
+// 自分のパスワード変更 (現在のパスワード必須)。他端末のセッションは無効化する
+api.post('/auth/password', authMiddleware, async (c) => {
+  const user = c.get('user')
+  const body = await c.req.json<any>()
+  const pwErr = validateNewPassword(body.new_password)
+  if (pwErr) return c.json({ error: pwErr }, 400)
+  const row = await c.env.DB.prepare('SELECT password_hash FROM users WHERE id = ?').bind(user.id).first<{ password_hash: string }>()
+  if (!row || !(await verifyPassword(String(body.current_password ?? ''), row.password_hash)).ok) {
+    return c.json({ error: '現在のパスワードが違います' }, 400)
+  }
+  const token = getCookie(c, 'session_token') || ''
+  await c.env.DB.batch([
+    c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(await hashPassword(body.new_password), user.id),
+    c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').bind(user.id, token)
+  ])
+  return c.json({ ok: true })
+})
+
+// ユーザー一覧 (管理者のみ)
+api.get('/users', authMiddleware, requireAdmin, async (c) => {
+  const { results } = await c.env.DB.prepare('SELECT id, username, display_name, role, created_at FROM users ORDER BY id ASC').all()
+  return c.json({ users: results })
+})
+
+// ユーザー追加 (管理者のみ)
+api.post('/users', authMiddleware, requireAdmin, async (c) => {
+  const body = await c.req.json<any>()
+  const username = String(body.username ?? '').trim()
+  const displayName = String(body.display_name ?? '').trim()
+  const role = body.role === 'admin' ? 'admin' : 'user'
+  if (!/^[A-Za-z0-9_.-]{3,32}$/.test(username)) return c.json({ error: 'ユーザー名は半角英数字と _ . - の3〜32文字で入力してください' }, 400)
+  if (!displayName || displayName.length > 50) return c.json({ error: '表示名を50文字以内で入力してください' }, 400)
+  const pwErr = validateNewPassword(body.password)
+  if (pwErr) return c.json({ error: pwErr }, 400)
+  const dup = await c.env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first()
+  if (dup) return c.json({ error: `ユーザー名 "${username}" は既に使われています` }, 409)
+  const res = await c.env.DB.prepare('INSERT INTO users (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)')
+    .bind(username, await hashPassword(body.password), displayName, role).run()
+  return c.json({ id: Number(res.meta.last_row_id) })
+})
+
+// 他ユーザーのパスワード再設定 (管理者のみ)。対象ユーザーのセッションは無効化する
+api.put('/users/:id/password', authMiddleware, requireAdmin, async (c) => {
+  const id = Number(c.req.param('id'))
+  const body = await c.req.json<any>()
+  const pwErr = validateNewPassword(body.new_password)
+  if (pwErr) return c.json({ error: pwErr }, 400)
+  const target = await c.env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(id).first()
+  if (!target) return c.json({ error: 'ユーザーが見つかりません' }, 404)
+  const stmts = [c.env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(await hashPassword(body.new_password), id)]
+  // 自分自身を再設定した場合は今のセッションを残す
+  const token = getCookie(c, 'session_token') || ''
+  stmts.push(c.env.DB.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').bind(id, token))
+  await c.env.DB.batch(stmts)
+  return c.json({ ok: true })
 })
 
 // ==== 加工実績 ====

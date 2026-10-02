@@ -49,7 +49,7 @@ export async function hashPassword(password: string): Promise<string> {
   return `pbkdf2$${PBKDF2_ITERATIONS}$${toHex(salt)}$${await pbkdf2(password, salt, PBKDF2_ITERATIONS)}`
 }
 
-async function verifyPassword(password: string, stored: string): Promise<{ ok: boolean; legacy: boolean }> {
+export async function verifyPassword(password: string, stored: string): Promise<{ ok: boolean; legacy: boolean }> {
   if (stored.startsWith('pbkdf2$')) {
     const [, iter, saltHex, hash] = stored.split('$')
     const actual = await pbkdf2(password, fromHex(saltHex), Number(iter))

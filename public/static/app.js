@@ -434,6 +434,10 @@ const api = {
   },
   login(username, password) { return this._safeRequest(async () => (await axios.post('/api/auth/login', { username, password })).data); },
   logout() { return this._safeRequest(async () => (await axios.post('/api/auth/logout')).data); },
+  changePassword(current_password, new_password) { return this._safeRequest(async () => (await axios.post('/api/auth/password', { current_password, new_password })).data); },
+  listUsers() { return this._safeRequest(async () => (await axios.get('/api/users')).data.users || []); },
+  createUser(data) { return this._safeRequest(async () => (await axios.post('/api/users', data)).data); },
+  resetUserPassword(id, new_password) { return this._safeRequest(async () => (await axios.put(`/api/users/${id}/password`, { new_password })).data); },
   async me() {
     try { return (await axios.get('/api/auth/me')).data.user; }
     catch (e) {
@@ -606,6 +610,9 @@ function renderLayout() {
               <i class="fas fa-user-circle mr-1"></i>${escapeHtml(u.display_name)}
               <span class="ml-1 px-2 py-0.5 text-xs rounded ${u.role==='admin'?'bg-orange-100 text-orange-800':'bg-gray-100 text-gray-700'}">${u.role==='admin'?'管理者':'一般'}</span>
             </span>
+            <button data-nav="account" class="btn-secondary text-sm">
+              <i class="fas fa-key mr-1"></i>${u.role==='admin'?'パスワード・ユーザー':'パスワード設定'}
+            </button>
             <button id="logoutBtn" class="btn-secondary text-sm">
               <i class="fas fa-sign-out-alt mr-1"></i>ログアウト
             </button>
@@ -677,12 +684,147 @@ async function renderMain() {
       case 'transport-input': renderTransportInput(); break;
       case 'transport-list': await renderTransportList(); break;
       case 'transport-analysis': await renderTransportAnalysis(); break;
+      case 'account': await renderAccount(); break;
       default: renderDashboard();
     }
   } catch (err) {
     console.error('[view error]', err);
     setSectionError(main, err.message || '画面の表示に失敗しました', { retry: () => renderMain() });
   }
+}
+
+// ========== パスワード設定・ユーザー管理 ==========
+async function renderAccount() {
+  const main = document.getElementById('main');
+  const isAdmin = state.user?.role === 'admin';
+  if (state.useSampleData) {
+    main.innerHTML = `<div class="bg-white rounded-xl shadow-sm p-6 text-sm text-gray-600">プレビューモードではパスワードを変更できません。</div>`;
+    return;
+  }
+  main.innerHTML = `
+    <div class="space-y-4 max-w-3xl">
+      <div class="bg-white rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-bold mb-3"><i class="fas fa-key mr-1 text-blue-600"></i>パスワード変更</h2>
+        <form id="pwForm" class="grid gap-3 max-w-md">
+          <input type="text" autocomplete="username" value="${escapeHtml(state.user?.username)}" class="hidden" readonly />
+          <label class="text-sm">現在のパスワード
+            <input id="pwCurrent" type="password" required class="input-base mt-1" autocomplete="current-password" /></label>
+          <label class="text-sm">新しいパスワード（8文字以上）
+            <input id="pwNew" type="password" required minlength="8" class="input-base mt-1" autocomplete="new-password" /></label>
+          <label class="text-sm">新しいパスワード（確認）
+            <input id="pwNew2" type="password" required minlength="8" class="input-base mt-1" autocomplete="new-password" /></label>
+          <div id="pwMsg" class="text-sm hidden"></div>
+          <div><button type="submit" class="btn-primary"><i class="fas fa-save mr-1"></i>変更する</button></div>
+        </form>
+        <p class="text-xs text-gray-500 mt-3">変更すると、ほかの端末でのログインは解除されます。</p>
+      </div>
+      ${isAdmin ? `
+      <div class="bg-white rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-bold mb-3"><i class="fas fa-users-cog mr-1 text-blue-600"></i>ユーザー管理</h2>
+        <div id="userList" class="overflow-x-auto"></div>
+      </div>
+      <div class="bg-white rounded-xl shadow-sm p-5">
+        <h2 class="text-lg font-bold mb-3"><i class="fas fa-user-plus mr-1 text-blue-600"></i>ユーザー追加</h2>
+        <form id="userForm" class="grid gap-3 md:grid-cols-2">
+          <label class="text-sm">ユーザー名（半角英数字）
+            <input id="nuUsername" type="text" required class="input-base mt-1" autocomplete="off" /></label>
+          <label class="text-sm">表示名
+            <input id="nuDisplay" type="text" required class="input-base mt-1" /></label>
+          <label class="text-sm">初期パスワード（8文字以上）
+            <input id="nuPassword" type="password" required minlength="8" class="input-base mt-1" autocomplete="new-password" /></label>
+          <label class="text-sm">権限
+            <select id="nuRole" class="input-base mt-1"><option value="user">一般</option><option value="admin">管理者</option></select></label>
+          <div id="nuMsg" class="text-sm hidden md:col-span-2"></div>
+          <div class="md:col-span-2"><button type="submit" class="btn-primary"><i class="fas fa-plus mr-1"></i>追加する</button></div>
+        </form>
+      </div>` : ''}
+    </div>
+  `;
+
+  const showMsg = (el, ok, text) => {
+    el.className = 'text-sm ' + (ok ? 'text-green-700' : 'text-red-600');
+    el.textContent = text;
+  };
+
+  document.getElementById('pwForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById('pwMsg');
+    const cur = document.getElementById('pwCurrent').value;
+    const nw = document.getElementById('pwNew').value;
+    if (nw !== document.getElementById('pwNew2').value) return showMsg(msg, false, '新しいパスワードが確認欄と一致しません');
+    try {
+      await api.changePassword(cur, nw);
+      e.target.reset();
+      showMsg(msg, true, 'パスワードを変更しました');
+    } catch (err) {
+      showMsg(msg, false, err.message || '変更に失敗しました');
+    }
+  });
+
+  if (!isAdmin) return;
+
+  async function loadUsers() {
+    const el = document.getElementById('userList');
+    setSectionLoading(el);
+    try {
+      const users = await api.listUsers();
+      el.innerHTML = `
+        <table class="w-full text-sm">
+          <thead><tr class="text-left border-b"><th class="py-2 pr-2">ユーザー名</th><th class="pr-2">表示名</th><th class="pr-2">権限</th><th>パスワード再設定</th></tr></thead>
+          <tbody>
+            ${users.map(u => `
+              <tr class="border-b">
+                <td class="py-2 pr-2">${escapeHtml(u.username)}</td>
+                <td class="pr-2">${escapeHtml(u.display_name)}</td>
+                <td class="pr-2">${u.role === 'admin' ? '管理者' : '一般'}</td>
+                <td class="py-2">
+                  <form data-reset="${Number(u.id)}" class="flex gap-2 items-center flex-wrap">
+                    <input type="password" minlength="8" required placeholder="新しいパスワード" class="input-base" style="max-width:12rem" autocomplete="new-password" />
+                    <button type="submit" class="btn-secondary text-sm">再設定</button>
+                    <span class="text-xs hidden"></span>
+                  </form>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>`;
+      el.querySelectorAll('form[data-reset]').forEach(f => {
+        f.addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const input = f.querySelector('input');
+          const out = f.querySelector('span');
+          try {
+            await api.resetUserPassword(f.dataset.reset, input.value);
+            input.value = '';
+            showMsg(out, true, '再設定しました');
+          } catch (err) {
+            showMsg(out, false, err.message || '再設定に失敗しました');
+          }
+        });
+      });
+    } catch (err) {
+      setSectionError(el, err.message, { retry: loadUsers, onSample: false });
+    }
+  }
+
+  document.getElementById('userForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const msg = document.getElementById('nuMsg');
+    try {
+      await api.createUser({
+        username: document.getElementById('nuUsername').value,
+        display_name: document.getElementById('nuDisplay').value,
+        password: document.getElementById('nuPassword').value,
+        role: document.getElementById('nuRole').value
+      });
+      e.target.reset();
+      showMsg(msg, true, 'ユーザーを追加しました');
+      loadUsers();
+    } catch (err) {
+      showMsg(msg, false, err.message || '追加に失敗しました');
+    }
+  });
+
+  await loadUsers();
 }
 
 // ========== ダッシュボード ==========
